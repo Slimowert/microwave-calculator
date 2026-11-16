@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microwave-calculator"
+version = "1.0.0"
+description = "Desktop calculator for microstrip and microwave power dividers"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "numpy==2.3.3",
+    "scipy==1.16.2",
+    "PySide6==6.9.3",
+    "matplotlib==3.10.6",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.gui-scripts]
+microwave-calculator = "microwave_calculator.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["microwave_calculator*"]
+
+[tool.setuptools.package-data]
+microwave_calculator = ["figures/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
