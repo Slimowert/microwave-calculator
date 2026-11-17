@@ -12,7 +12,7 @@ from matplotlib.patches import Rectangle
 from .core import Result
 
 DB_FLOOR = -100
-SERIES = ("#1467bc", "#0b969e", "#7357bb", "#be642a", "#556e9a")
+SERIES = ("#0752d9", "#00c7df", "#7357bb", "#e88832", "#556e9a")
 
 BOOK_FIGURES = {
     "microstrip": ("microstrip", "3.25(a)", 147),
@@ -50,16 +50,44 @@ def book_figure(figure: Figure, result: Result, *, compact: bool = False) -> str
 def style_axes(ax: Axes) -> None:
     """Apply the common style to a frequency-response axis."""
     ax.set_axisbelow(True)
-    ax.set_facecolor("#f8fbff")
+    ax.set_facecolor("#ffffff")
     ax.spines[["top", "right"]].set_visible(False)
     for edge in ("left", "bottom"):
-        ax.spines[edge].set_color("#cbd9e7")
-    ax.tick_params(colors="#4b657e", labelsize=8, length=3)
-    ax.xaxis.label.set_color("#415e79")
-    ax.yaxis.label.set_color("#415e79")
+        ax.spines[edge].set_color("#53627a")
+    ax.tick_params(colors="#26334b", labelsize=9, length=3)
+    ax.xaxis.label.set_color("#26334b")
+    ax.yaxis.label.set_color("#26334b")
     ax.title.set_color("#1c3e62")
     ax.title.set_fontsize(10)
-    ax.grid(color="#dce8f4", linewidth=0.7)
+    ax.grid(color="#e0e6f0", linewidth=0.7)
+
+
+def plot_topology_preview(figure: Figure, result: Result) -> None:
+    """Show a symbolic topology that stays valid while inputs are edited."""
+    if result.kind not in ("wilkinson_equal", "tee"):
+        book_figure(figure, result, compact=True)
+        return
+    figure.clear()
+    ax = figure.subplots()
+    ax.axis("off")
+    color = "#202b3d"
+    ax.plot([0.08, 0.22], [0.5, 0.5], color=color, lw=1.1)
+    ax.plot([0.22, 0.22], [0.3, 0.7], color=color, lw=1.1)
+    ax.plot(0.08, 0.5, "o", mfc="white", mec=color, ms=4)
+    ax.text(0.08, 0.57, "P₁", fontsize=9, ha="center")
+    for index, y in enumerate((0.7, 0.3), 2):
+        ax.plot([0.22, 0.93], [y, y], color=color, lw=1.1)
+        ax.add_patch(Rectangle((0.34, y - 0.025), 0.32, 0.05,
+                               facecolor="white", edgecolor=color, lw=1.1, zorder=3))
+        ax.text(0.50, y + (0.065 if index == 2 else -0.10), "Z ветви", fontsize=8, ha="center")
+        ax.plot(0.93, y, "o", mfc="white", mec=color, ms=4)
+        ax.text(0.93, y + 0.065, f"P{index}", fontsize=9, ha="center")
+    if result.kind == "wilkinson_equal":
+        ax.plot([0.76, 0.76], [0.3, 0.7], color=color, lw=1.1, marker="o", ms=2.5)
+        ax.add_patch(Rectangle((0.735, 0.44), 0.05, 0.12,
+                               facecolor="white", edgecolor=color, lw=1.1, zorder=3))
+        ax.text(0.82, 0.5, "R", va="center", fontsize=9)
+    ax.set(xlim=(0, 1.02), ylim=(0.12, 0.9))
 
 
 def plot_schematic(figure: Figure, result: Result, *, compact: bool = False) -> None:
@@ -184,7 +212,7 @@ def _plot_transformer_schematic(ax: Axes, result: Result) -> None:
 
 
 def _plot_two_output_schematic(ax: Axes, result: Result, *, compact: bool) -> None:
-    color = "#245875"
+    color = "#202b3d"
     sections = list(result.sections.values())
     unequal = len(sections) == 4
     x_internal = 0.53 if unequal else 0.73
@@ -200,6 +228,8 @@ def _plot_two_output_schematic(ax: Axes, result: Result, *, compact: bool) -> No
         ax.plot([0.20, 0.20, x_output], [0.5, y, y], color=color)
         ax.plot(x_output, y, "o", color=color, mfc="white", ms=4)
         x_branch = 0.34 if unequal else 0.43
+        ax.add_patch(Rectangle((x_branch - 0.105, y - 0.027), 0.21, 0.054,
+                               facecolor="white", edgecolor=color, linewidth=1.2, zorder=3))
         ax.text(
             x_branch,
             y + offset,
@@ -218,6 +248,8 @@ def _plot_two_output_schematic(ax: Axes, result: Result, *, compact: bool) -> No
             color=color,
         )
         if unequal:
+            ax.add_patch(Rectangle((0.63, y - 0.027), 0.12, 0.054,
+                                   facecolor="white", edgecolor=color, linewidth=1.2, zorder=3))
             ax.text(
                 0.69,
                 y + offset,
@@ -347,13 +379,77 @@ def plot_overview(figure: Figure, result: Result) -> None:
         ax.legend(fontsize=8, frameon=False)
 
 
-def plot_power(figure: Figure, result: Result) -> None:
-    """Show the divider power balance at the design frequency."""
+def plot_dashboard_trace(figure: Figure, result: Result, *, reflection: bool = False) -> None:
+    """Draw one dashboard chart, including the actual value at f₀."""
     figure.clear()
     ax = figure.subplots()
-    ax.axis("off")
+    traces = {trace.name: trace for trace in result.traces}
+    if result.center_s is None:
+        names = ["КСВН"] if reflection else ["|Γ|"]
+    elif result.center_s.shape[0] == 2:
+        names = ["S11"] if reflection else ["S21"]
+    elif reflection:
+        names = ["S11", "S23"]
+    else:
+        names = [f"S{i}1" for i in range(2, result.center_s.shape[0] + 1)]
+    x = result.frequency / 1e9
+    center_labels = []
+    center_values = []
+    for index, name in enumerate(names):
+        if name not in traces:
+            continue
+        trace = traces[name]
+        is_db = trace.unit == "дБ"
+        values = np.maximum(trace.values, DB_FLOOR) if is_db else trace.values
+        label = name
+        if reflection and result.center_s is not None and result.center_s.shape[0] >= 3:
+            label = {"S11": "Return Loss (S₁₁)", "S23": "Isolation (S₂₃)"}.get(name, name)
+        ax.plot(x, values, label=label, color=SERIES[index % len(SERIES)],
+                lw=1.9, ls="-" if index % 2 == 0 else "--")
+        if result.center_s is not None and name.startswith("S"):
+            i, j = int(name[1]) - 1, int(name[2]) - 1
+            amplitude = abs(result.center_s[i, j])
+            value = max(DB_FLOOR, 20 * np.log10(max(amplitude, 1e-15)))
+            text = f"≤ {DB_FLOOR}" if amplitude <= 10 ** (DB_FLOOR / 20) else f"{value:.2f}"
+        else:
+            value = float(np.interp(result.f0 / 1e9, x, values))
+            text = f"{value:.3g}"
+        center_values.append(value)
+        center_labels.append(f"{name} = {text} {trace.unit}")
+    in_range = result.frequency[0] <= result.f0 <= result.frequency[-1]
+    if in_range:
+        ax.axvline(result.f0 / 1e9, color="#ff8527", ls="--", lw=0.9, alpha=0.9)
+        if center_values:
+            ax.plot(result.f0 / 1e9, center_values[0], "o", ms=6,
+                    mfc="white", mec="#ff7c12", mew=1.3, clip_on=False, zorder=5)
+            label = f"f₀ = {result.f0 / 1e9:.3f} ГГц"
+            if len(center_labels) <= 3:
+                label += "\n" + "\n".join(center_labels)
+            ax.annotate(label, xy=(result.f0 / 1e9, center_values[0]),
+                        xytext=(0.48, 0.22 if reflection else 0.58), textcoords="axes fraction",
+                        fontsize=8, color="#17233a", linespacing=1.5,
+                        bbox=dict(boxstyle="round,pad=0.6", fc="#fffdf9", ec="#ff8527", lw=0.8),
+                        arrowprops=dict(arrowstyle="-", color="#ff8527", lw=0.8))
+    is_db = bool(names and names[0] in traces and traces[names[0]].unit == "дБ")
+    ax.set(xlim=(x[0], x[-1]), xlabel="Частота, ГГц",
+           ylabel="Уровень, дБ" if is_db else traces[names[0]].unit)
+    if is_db:
+        if reflection:
+            ax.set_ylim(DB_FLOOR - 5, 0)
+        else:
+            minimum = min(float(np.nanmin(np.maximum(traces[n].values, DB_FLOOR))) for n in names if n in traces)
+            ax.set_ylim(max(DB_FLOOR - 2, min(-20, minimum - 2)), 0)
+    style_axes(ax)
+    ax.xaxis.label.set_fontsize(9)
+    ax.yaxis.label.set_fontsize(9)
+    ax.legend(fontsize=8, loc="lower left", frameon=True, facecolor="white",
+              edgecolor="#cbd8e9", framealpha=0.95)
+
+
+def plot_power(figure: Figure, result: Result) -> None:
+    """Show a compact donut and a readable accounting of the incident power."""
+    figure.clear()
     if result.center_s is None or result.center_s.shape[0] < 3:
-        ax.text(0.5, 0.5, "Баланс доступен для делителей", ha="center", va="center")
         return
     power = abs(result.center_s[:, 0]) ** 2
     reflected = float(power[0])
@@ -361,18 +457,18 @@ def plot_power(figure: Figure, result: Result) -> None:
     values = list(power[1:]) + [reflected, loss]
     labels = [f"P{i}" for i in range(2, len(power) + 1)] + ["Отражено", "Потери"]
     selected = [(label, value) for label, value in zip(labels, values) if value > 1e-10]
-    wedges, _ = ax.pie(
-        [value for _, value in selected],
-        colors=["#0757ad", "#0cbabe", "#6479de", "#84abdc", "#d7803e"],
-        startangle=90,
-        wedgeprops={"width": 0.38, "edgecolor": "white"},
-    )
-    ax.text(0, 0, "P₁\n100%", ha="center", va="center", weight="bold")
-    ax.legend(
-        wedges,
-        [f"{label}  {value:.1%}" for label, value in selected],
-        loc="center left",
-        bbox_to_anchor=(1, 0.5),
-        fontsize=8,
-        frameon=False,
-    )
+    ax, text_ax = figure.subplots(1, 2, gridspec_kw={"width_ratios": [1, 1.25]})
+    ax.pie([value for _, value in selected], colors=SERIES, startangle=90, counterclock=False,
+           wedgeprops={"width": 0.31, "edgecolor": "white", "linewidth": 1.4})
+    ax.text(0, 0, "P₁\n100%", ha="center", va="center", weight="bold", fontsize=11, color="#111b32")
+    ax.set_aspect("equal")
+    text_ax.axis("off")
+    text_ax.text(0.02, 0.91, "Входная мощность: 100%", fontsize=8, color="#18253e", va="top")
+    spacing = min(0.26, 0.72 / max(1, len(selected)))
+    for index, (label, value) in enumerate(selected):
+        y = 0.65 - index * spacing
+        text_ax.plot(0.05, y, "s", ms=7, color=SERIES[index % len(SERIES)], clip_on=False)
+        db = 10 * np.log10(value)
+        text_ax.text(0.16, y, f"{label}  {value:.1%}  ({db:.2f} дБ)",
+                     fontsize=7.5, va="center", color="#18253e")
+    text_ax.set(xlim=(0, 1.1), ylim=(-0.15, 1))
