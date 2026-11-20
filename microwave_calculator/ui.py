@@ -38,6 +38,7 @@ from .core import InputError, Result, divider, microstrip, transformer
 from .desktop_style import STYLE, Sidebar, card, icon
 from .export import write_csv, write_json
 from .extended import lowpass, multi_divider
+from .hfss import HFSS_KINDS, write_hfss
 from .plots import (
     book_figure,
     plot_dashboard_trace,
@@ -52,11 +53,11 @@ DEVICES = {
     "microstrip_analysis": "Микрополосковая линия · анализ",
     "microstrip_synthesis": "Микрополосковая линия · синтез",
     "transformer": "Четвертьволновой трансформатор",
-    "tee": "T-junction",
+    "tee": "Т-делитель",
     "wilkinson_equal": "Wilkinson 1:1",
-    "wilkinson_unequal": "Wilkinson Unequal",
-    "resistive": "Resistive Divider",
-    "wilkinson_n": "Wilkinson N-way",
+    "wilkinson_unequal": "Wilkinson · неравное деление",
+    "resistive": "Резистивный делитель",
+    "wilkinson_sections": "Wilkinson · 1–8 секций",
     "butterworth": "ФНЧ Баттерворта",
     "chebyshev": "ФНЧ Чебышёва",
 }
@@ -75,7 +76,8 @@ FIELDS = {
     "start": ("Начальная частота fmin", "1,2", FREQUENCY),
     "stop": ("Конечная частота fmax", "3,6", FREQUENCY),
     "count": ("Число точек N", "1001", ("1",)),
-    "outputs": ("Число выходов N", "3", ("1",)),
+    "impedances": ("Z секций, Ом", "50.2835214;52.26305344;58.57082316;70.71067812;85.36673603;95.66987903;99.43615444", ("Ом",)),
+    "resistances": ("R секций, Ом", "8867.676398;652.6363658;424.8722393;208.042083;120.5338472;70.66287939;96.22736412", ("Ом",)),
     "order": ("Порядок фильтра n", "3", ("1",)),
     "ripple": ("Пульсации Ap", "0,5", ("дБ",)),
 }
@@ -172,6 +174,7 @@ class CalculatorWindow(QMainWindow):
         self.calculate()
         self._sync_navigation(0)
         self.calculate_button.setShortcut("Ctrl+Return")
+        self.calculate_button.setToolTip("Рассчитать (Ctrl+Enter)")
 
     def _build_sidebar(self) -> QWidget:
         sidebar = Sidebar()
@@ -312,7 +315,7 @@ class CalculatorWindow(QMainWindow):
         self.preview = canvas()
         self.reflection = canvas()
         self.preview_card = card("|S₂₁|, |S₃₁| по частоте", self.preview, "wave")
-        self.reflection_card = card("Return Loss / Isolation", self.reflection, "wave")
+        self.reflection_card = card("Отражение и связь выходов", self.reflection, "wave")
         bottom_layout.addWidget(self.preview_card, 1)
         bottom_layout.addWidget(self.reflection_card, 1)
         side = QWidget()
@@ -455,6 +458,8 @@ class CalculatorWindow(QMainWindow):
             ("JSON", "Исходные данные и результаты", "Параметры устройства, номиналы элементов и комплексная S-матрица на f₀."),
             ("CSV", "Частотные характеристики", "Все точки частотной сетки для анализа в Excel, Python и других приложениях."),
             ("PNG", "Графики и схемы", "Частотные графики. Для сохранения схемы откройте её и нажмите «Экспорт PNG»."),
+            ("HFSS", "3D-модель для Ansys HFSS", "Скрипт .py для линии, Т-делителя или двухвыходного Wilkinson. "
+             "В Electronics Desktop: Tools → Run Script. Затем Analyze All для построения графиков."),
         ):
             row = QWidget()
             line = QHBoxLayout(row)
@@ -518,7 +523,7 @@ class CalculatorWindow(QMainWindow):
         for position, (kind, title) in enumerate((
             ("wilkinson_equal", "Wilkinson 1:1"),
             ("wilkinson_unequal", "Неравный делитель"),
-            ("wilkinson_n", "Многоканальный делитель"),
+            ("wilkinson_sections", "Многосекционный Wilkinson"),
             ("microstrip_synthesis", "Микрополосковая линия"),
             ("transformer", "Трансформатор λ/4"),
             ("butterworth", "LC-фильтр нижних частот"),
@@ -573,6 +578,10 @@ class CalculatorWindow(QMainWindow):
 
     def _set_feedback(self, message: str, state: str = "") -> None:
         self.feedback.setText(message)
+        if self.tabs.currentIndex() != 0:
+            self.statusBar().showMessage(message)
+        elif self.statusBar().currentMessage():
+            self.statusBar().clearMessage()
         self.feedback.setProperty("state", state)
         self.feedback.style().unpolish(self.feedback)
         self.feedback.style().polish(self.feedback)
@@ -637,7 +646,8 @@ class CalculatorWindow(QMainWindow):
             self.render_schematic(self.result)
 
     def render_schematic(self, result: Result) -> None:
-        if self.scheme_view.currentData() == "calculated":
+        self.scheme_view.setEnabled(result.kind != "wilkinson_sections")
+        if result.kind == "wilkinson_sections" or self.scheme_view.currentData() == "calculated":
             self.scheme_note.clear()
             plot_schematic(self.schematic.figure, result)
         else:
@@ -691,8 +701,8 @@ class CalculatorWindow(QMainWindow):
             keys = ["z0", "f0", "start", "stop", "count"]
         else:
             keys = ["z0", "f0", "h", "er"]
-            if kind == "wilkinson_n":
-                keys.append("outputs")
+            if kind == "wilkinson_sections":
+                keys.extend(("impedances", "resistances"))
             else:
                 keys.append("ratio")
             keys.extend(("start", "stop", "count"))
@@ -708,6 +718,8 @@ class CalculatorWindow(QMainWindow):
             if kind in FILTERS and key == "f0":
                 label = "Граница f₀"
             entry = QLineEdit("2" if key == "ratio" and kind == "wilkinson_unequal" else default)
+            if kind == "wilkinson_sections":
+                entry.setText({"f0": "5,5", "start": "4,9", "stop": "6", "count": "201"}.get(key, default))
             entry.setAccessibleName(label)
             entry.setMinimumWidth(44)
             if len(units) > 1:
@@ -755,7 +767,7 @@ class CalculatorWindow(QMainWindow):
         descriptions = {
             "wilkinson_equal": "Два равных выхода с согласованием и развязкой портов.",
             "wilkinson_unequal": "Два выхода с заданным отношением мощностей.",
-            "wilkinson_n": "Равное деление между 2–8 выходными портами.",
+            "wilkinson_sections": "Два выхода. Введите Z и R через «;», начиная с выходов. Число пар = число секций.",
             "tee": "Четвертьволновые ветви без развязывающего резистора.",
             "resistive": "Широкополосный резистивный делитель на два выхода.",
             "transformer": "Согласование нагрузки участком линии длиной λ/4.",
@@ -774,6 +786,9 @@ class CalculatorWindow(QMainWindow):
         for key, (entry, unit) in self.fields.items():
             raw = entry.text().strip().replace(",", ".")
             try:
+                if key in ("impedances", "resistances"):
+                    data[key] = tuple(float(item) for item in raw.split(";"))
+                    continue
                 unit_name = (
                     unit.currentText() if isinstance(unit, QComboBox) else unit.text()
                 )
@@ -783,7 +798,11 @@ class CalculatorWindow(QMainWindow):
                     else float(raw) * SCALE.get(unit_name, 1)
                 )
             except ValueError as error:
+                self.tabs.setCurrentIndex(0)
+                if self.advanced_container.isAncestorOf(entry):
+                    self.advanced_button.setChecked(True)
                 entry.setFocus()
+                entry.selectAll()
                 raise InputError(
                     f"{FIELDS[key][0]}: введите {'целое число' if key in INTEGERS else 'число'}."
                 ) from error
@@ -821,7 +840,7 @@ class CalculatorWindow(QMainWindow):
                     p["stop"],
                     p["count"],
                 )
-            elif kind in ("resistive", "wilkinson_n"):
+            elif kind in ("resistive", "wilkinson_sections"):
                 result = multi_divider(
                     kind,
                     p["z0"],
@@ -831,7 +850,7 @@ class CalculatorWindow(QMainWindow):
                     p["start"],
                     p["stop"],
                     p["count"],
-                    p.get("outputs", 2),
+                    impedances=p.get("impedances", ()), resistances=p.get("resistances", ()),
                 )
             else:
                 result = divider(
@@ -850,7 +869,13 @@ class CalculatorWindow(QMainWindow):
             self._update_view_options()
             self._set_feedback("Расчёт выполнен · f₀ = " + f"{result.f0 / 1e9:.3f} ГГц", "success")
             for extension, button in self.export_actions:
-                button.setEnabled(extension != "CSV" or result.frequency is not None)
+                available = (extension != "CSV" or result.frequency is not None) and (
+                    extension != "HFSS" or result.kind in HFSS_KINDS
+                )
+                button.setEnabled(available)
+                if extension == "HFSS":
+                    button.setToolTip("Сохранить скрипт построения модели" if available
+                                      else "Для этого устройства физическая разводка пока не задана.")
         except (InputError, OverflowError, np.linalg.LinAlgError) as error:
             self._set_feedback(f"Ошибка расчёта: {error}", "error")
         except Exception:
@@ -887,7 +912,7 @@ class CalculatorWindow(QMainWindow):
             elif result.center_s.shape[0] == 2:
                 titles = ("Передача |S₂₁| по частоте", "Отражение |S₁₁| по частоте")
             else:
-                titles = ("Передача на выходы по частоте", "Return Loss / Isolation")
+                titles = ("Передача на выходы по частоте", "Отражение и связь выходов")
             self.preview_card.title.setText(titles[0])
             self.reflection_card.title.setText(titles[1])
         if result.center_s is not None and result.center_s.shape[0] >= 3:
@@ -920,6 +945,8 @@ class CalculatorWindow(QMainWindow):
                     ("Требуемое сопротивление, Ом", result.inputs["target_ohm"])
                 )
         for name, section in result.sections.items():
+            if "r_ohm" in section:
+                rows.append((f"{name} · R, Ом", section["r_ohm"]))
             if "inductance_h" in section:
                 rows.append((f"{name}, нГн", section["inductance_h"] * 1e9))
                 continue
@@ -981,7 +1008,9 @@ class CalculatorWindow(QMainWindow):
         is_divider = result.center_s is not None and result.center_s.shape[0] >= 3
         if is_divider:
             sections = list(result.sections.values())
-            if sections and "z_ohm" in sections[0]:
+            if result.kind == "wilkinson_sections":
+                metrics.append(("Секций", str(len(sections))))
+            elif sections and "z_ohm" in sections[0]:
                 impedances = list(dict.fromkeys(section["z_ohm"] for section in sections[:2]))
                 metrics.append(("Z₂ / Z₃" if len(impedances) > 1 else "Z ветви", " / ".join(f"{z:.2f}" for z in impedances) + " Ω"))
             resistor = result.summary.get("Развязывающий резистор, Ом", result.summary.get("Каждый резистор звезды, Ом"))
@@ -1005,7 +1034,7 @@ class CalculatorWindow(QMainWindow):
     def save(self, extension: str) -> None:
         if self.result is None:
             return
-        suffix = extension.lower()
+        suffix = "py" if extension == "HFSS" else extension.lower()
         path, _ = QFileDialog.getSaveFileName(
             self,
             f"Экспорт {extension}",
@@ -1021,6 +1050,8 @@ class CalculatorWindow(QMainWindow):
                 write_json(path, self.result)
             elif extension == "CSV":
                 write_csv(path, self.result)
+            elif extension == "HFSS":
+                write_hfss(path, self.result)
             else:
                 canvas = (
                     self.schematic

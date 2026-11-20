@@ -33,6 +33,9 @@ def multi_divider(
     stop: float,
     count: int | np.integer,
     outputs: int = 3,
+    *,
+    impedances=(),
+    resistances=(),
 ) -> Result:
     """Calculate a resistive or multi-output Wilkinson divider."""
     positive(z0, "Опорное сопротивление")
@@ -45,6 +48,28 @@ def multi_divider(
         lines = []
         summary = {"Каждый резистор звезды, Ом": z0 / 3}
         model = "Три идеальных резистора. Половина входной мощности рассеивается при согласованных портах."
+    elif kind == "wilkinson_sections":
+        outputs = 2
+        number = len(impedances)
+        if not 1 <= number <= 8 or len(resistances) != number:
+            raise InputError("Введите от 1 до 8 пар Z и R, разделяя значения точкой с запятой.")
+        lines, star = [], []
+        previous = (1, 2)
+        for index, (impedance, resistance) in enumerate(zip(impedances, resistances), 1):
+            positive(resistance, f"R{index}")
+            line = microstrip(h, er, f0, impedance=impedance).summary
+            sections[f"Секция {index}"] = {
+                "z_ohm": impedance, "r_ohm": resistance,
+                "width_m": line["Ширина, мм"] * 1e-3,
+                "effective_er": line["Эффективная проницаемость"],
+                "length_m": line["Длина волны, мм"] / 4000,
+            }
+            upstream = (0, 0) if index == number else (2*index+1, 2*index+2)
+            lines.extend((left, right, impedance) for left, right in zip(upstream, previous))
+            star.append((*previous, resistance))
+            previous = upstream
+        summary = {"Секций в плече": number}
+        model = IDEAL + "\nСекция 1 ближайшая к выходам; все участки λ/4 на f₀.\n" + MICRO
     elif kind == "wilkinson_n":
         if not isinstance(outputs, int) or not 2 <= outputs <= 8:
             raise InputError("Число выходов: введите целое число от 2 до 8.")
@@ -62,9 +87,9 @@ def multi_divider(
         model = IDEAL + "\nРезисторы соединены в плавающую звезду.\n" + MICRO
     else:
         raise InputError("Неизвестный тип делителя.")
-    full = network_s(
-        np.r_[frequency, f0], f0, z0, lines, ports=outputs + 1, resistors=star
-    )
+    grid = np.r_[frequency, f0]
+    full = np.concatenate([network_s(chunk, f0, z0, lines, ports=outputs + 1, resistors=star)
+                           for chunk in np.array_split(grid, (len(grid)+255)//256)])
     s, center = full[:-1], full[-1]
     output_ports = range(1, outputs + 1)
     traces = [

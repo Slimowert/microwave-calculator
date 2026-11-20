@@ -29,6 +29,9 @@ BOOK_FIGURES = {
 
 def book_figure(figure: Figure, result: Result, *, compact: bool = False) -> str:
     """Draw the reference figure and return its short citation."""
+    if result.kind == "wilkinson_sections":
+        plot_schematic(figure, result, compact=compact)
+        return "Расчётная схема"
     name, number, page = BOOK_FIGURES[result.kind]
     resource = files("microwave_calculator").joinpath("figures", f"{name}.png")
     with resource.open("rb") as stream:
@@ -97,6 +100,21 @@ def plot_schematic(figure: Figure, result: Result, *, compact: bool = False) -> 
     ax.axis("off")
     if result.kind in ("butterworth", "chebyshev"):
         _plot_filter_schematic(ax, result)
+        return
+    if result.kind == "wilkinson_sections":
+        number = len(result.sections) or 3
+        ax.plot([-1, 0], [0, 0], color="#245875")
+        ax.plot([0, 0], [-1, 1], color="#245875")
+        ax.text(-1, 0.1, "P1")
+        for level, port in ((1, "P2"), (-1, "P3")):
+            ax.plot([0, number+0.4], [level, level], color="#245875")
+            ax.text(number+0.45, level, port)
+        for index in range(number):
+            position = number-index
+            ax.plot([position, position], [-1, 1], color="#245875")
+            ax.text(position, 0, f"R{index+1}", ha="center", bbox=dict(facecolor="white"))
+            ax.text(position-0.5, 1.15, f"Z{index+1}", ha="center")
+        ax.set(xlim=(-1.2, number+1.4), ylim=(-1.5, 1.8))
         return
     if result.kind in ("resistive", "wilkinson_n"):
         _plot_multi_divider_schematic(ax, result)
@@ -403,7 +421,7 @@ def plot_dashboard_trace(figure: Figure, result: Result, *, reflection: bool = F
         values = np.maximum(trace.values, DB_FLOOR) if is_db else trace.values
         label = name
         if reflection and result.center_s is not None and result.center_s.shape[0] >= 3:
-            label = {"S11": "Return Loss (S₁₁)", "S23": "Isolation (S₂₃)"}.get(name, name)
+            label = {"S11": "Отражение S₁₁", "S23": "Связь S₂₃"}.get(name, name)
         ax.plot(x, values, label=label, color=SERIES[index % len(SERIES)],
                 lw=1.9, ls="-" if index % 2 == 0 else "--")
         if result.center_s is not None and name.startswith("S"):

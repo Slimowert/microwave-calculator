@@ -27,7 +27,7 @@ QWidget#cardHeader { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #fff
 QLabel#cardTitle { font-size: 15px; font-weight: 700; }
 QWidget#metric { background: #ffffff; border: 1px solid #dce4f0; border-radius: 7px; }
 QLabel#metricName { color: #34425d; font-size: 11px; }
-QLabel#metricValue { color: #ff740a; font-size: 18px; font-weight: 700; }
+QLabel#metricValue { color: #ad4800; font-size: 18px; font-weight: 700; }
 QPushButton { padding: 8px 13px; min-height: 18px; border: 1px solid #d3ddec;
     border-radius: 7px; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff,stop:1 #f7f9fd);
     color: #152039; font-weight: 500; }
@@ -45,7 +45,7 @@ QPushButton#navigation:checked { color: white; font-weight: 600;
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0655bd,stop:1 #093d84); }
 QPushButton#navigation:disabled { color: #a4afbf; }
 QPushButton#disclosure, QPushButton#textButton { border: 0; background: transparent;
-    color: #45658e; text-align: left; padding: 4px 0; font-size: 11px; min-height: 15px; }
+    color: #345478; text-align: left; padding: 4px 0; font-size: 12px; min-height: 19px; }
 QPushButton#textButton { color: #0757c9; }
 QPushButton#moduleButton { text-align: left; padding: 20px; font-size: 14px; }
 QLineEdit, QComboBox { background: #ffffff; border: 1px solid #d2ddec; border-radius: 5px;

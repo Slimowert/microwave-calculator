@@ -48,6 +48,14 @@ def test_desktop_workflow(monkeypatch, tmp_path):
             window.exports[extension].click()
             assert target.stat().st_size > 0
         assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        window.navigation[4][0].click()
+        target = tmp_path / "design"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        hfss = next(button for name, button in window.export_actions if name == "HFSS")
+        hfss.click()
+        assert target.with_suffix(".py").exists()
+        assert "design.py" in window.statusBar().currentMessage()
+        window.navigation[0][0].click()
         window.fields["f0"][0].setText("-2")
         assert not window.exports["JSON"].isEnabled()
         window.calculate_button.click()

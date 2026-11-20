@@ -25,6 +25,20 @@ def test_resistive_divider_matches_and_dissipates_half():
     assert np.sum(abs(result.center_s[:, 0])**2) == pytest.approx(0.5)
 
 
+@pytest.mark.parametrize("number", [1, 2, 7, 8])
+def test_cascaded_wilkinson(number):
+    from microwave_calculator.core import divider
+    impedances = np.linspace(55, 95, number) if number > 1 else [50*np.sqrt(2)]
+    result = multi_divider("wilkinson_sections", 50, .0008, 3.55, F0, *GRID,
+                           impedances=impedances, resistances=[100]*number)
+    assert len(result.sections) == number
+    assert result.scattering.shape == (101, 3, 3)
+    np.testing.assert_allclose(result.scattering[:, 1, 0], result.scattering[:, 2, 0], atol=1e-12)
+    if number == 1:
+        reference = divider("wilkinson_equal", 50, 1, .0008, 3.55, F0, *GRID)
+        np.testing.assert_allclose(result.scattering, reference.scattering, atol=1e-12)
+
+
 @pytest.mark.parametrize("kind,order", [
     ("butterworth", 3), ("butterworth", 10), ("chebyshev", 3), ("chebyshev", 4),
 ])

@@ -24,7 +24,7 @@ microwave-calculator = "microwave_calculator.ui:main"
 include = ["microwave_calculator*"]
 
 [tool.setuptools.package-data]
-microwave_calculator = ["figures/*.png"]
+microwave_calculator = ["figures/*.png", "hfss_template.py.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,147 @@
+# -*- coding: utf-8 -*-
+import os
+import ScriptEnv
+
+ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
+kind, variables, point_count = __CALCULATOR_PARAMETERS__
+project = oDesktop.NewProject()
+project.InsertDesign("HFSS", kind, "DrivenModal", "")
+design = project.SetActiveDesign(kind)
+editor = design.SetActiveEditor("3D Modeler")
+boundary = design.GetModule("BoundarySetup")
+editor.SetModelUnits(["NAME:Units Parameter", "Units:=", "mm", "Rescale:=", False])
+
+
+def variable(name, value):
+    shared = name.startswith("$")
+    owner = project if shared else design
+    tab, server = ("ProjectVariableTab", "ProjectVariables") if shared else ("LocalVariableTab", "LocalVariables")
+    owner.ChangeProperty(["NAME:AllTabs", ["NAME:" + tab, ["NAME:PropServers", server],
+                          ["NAME:NewProps", ["NAME:" + name, "PropType:=", "VariableProp",
+                           "UserDef:=", True, "Value:=", value]]]])
+
+
+for name, value in variables:
+    variable(name, value)
+project.GetDefinitionManager().AddMaterial(["NAME:BoardDielectric", "CoordinateSystemType:=", "Cartesian",
+    ["NAME:PhysicsTypes", "set:=", ["Electromagnetic"]], "permittivity:=", "$eps_r"])
+
+
+def attributes(name, material, inside):
+    return ["NAME:Attributes", "Name:=", name, "MaterialValue:=", '"' + material + '"',
+            "SolveInside:=", inside, "PartCoordinateSystem:=", "Global"]
+
+
+def sheet(name, xpos, ypos, zpos, width, height, axis="Z"):
+    editor.CreateRectangle(["NAME:RectangleParameters", "IsCovered:=", True,
+        "XStart:=", xpos, "YStart:=", ypos, "ZStart:=", zpos, "Width:=", width,
+        "Height:=", height, "WhichAxis:=", axis], attributes(name, "vacuum", True))
+
+
+def across_sheet(name, axis):
+    vertices = [list(map(float, editor.GetVertexPosition(vertex)))
+                for vertex in editor.GetVertexIDsFromObject(name)]
+    vertices.sort(key=lambda point: point[axis])
+    if len(vertices) != 4:
+        raise ValueError("Expected a rectangular boundary: " + name)
+    def midpoint(first, second):
+        return ["%.15gmm" % ((first[idx] + second[idx]) / 2) for idx in range(3)]
+    return ["Start:=", midpoint(*vertices[:2]), "End:=", midpoint(*vertices[2:])]
+
+
+def port(number, xpos, center):
+    name = "P%d" % number
+    sheet(name, xpos, center + "-w_feed/2", "0mm", "w_feed", "sub_h", "X")
+    boundary.AssignLumpedPort(["NAME:" + name, "Objects:=", [name], "DoDeembed:=", False,
+        "RenormalizeAllTerminals:=", True, ["NAME:Modes", ["NAME:Mode1", "ModeNum:=", 1,
+        "UseIntLine:=", True, ["NAME:IntLine"] + across_sheet(name, 2), "AlignmentGroup:=", 0, "CharImp:=", "Zpi",
+        "RenormImp:=", "z_ref"]], "ShowReporterFilter:=", False, "ReporterFilter:=", [True],
+        "Impedance:=", "z_ref"])
+
+
+metal = []
+
+
+def trace(name, xpos, ypos, width, height):
+    sheet(name, xpos, ypos, "sub_h", width, height)
+    metal.append(name)
+
+
+if kind == "microstrip":
+    trace("Line", "0mm", "-w_feed/2", "line_len", "w_feed")
+    ports = [("0mm", "0mm"), ("line_len", "0mm")]
+    xmin, xmax, ymin, ymax = "0mm", "line_len", "-w_feed/2", "w_feed/2"
+else:
+    trace("InputTrace", "-lead", "-w_feed/2", "lead", "w_feed")
+    trace("UpperBend", "-w2/2", "0mm", "w2", "top_y")
+    trace("LowerBend", "-w3/2", "bot_y", "w3", "-bot_y")
+    trace("UpperBranch", "-w2/2", "top_y-w2/2", "joint_x+w2/2", "w2")
+    trace("LowerBranch", "-w3/2", "bot_y-w3/2", "joint_x+w3/2", "w3")
+    ends = ["joint_x", "joint_x"]
+    if "w4" in dict(variables):
+        trace("UpperMatch", "joint_x", "top_y-w4/2", "len4", "w4")
+        trace("LowerMatch", "joint_x", "bot_y-w5/2", "len5", "w5")
+        ends = ["joint_x+len4", "joint_x+len5"]
+    ports = [("-lead", "0mm")]
+    for index, center in enumerate(["top_y", "bot_y"]):
+        trace("Output%d" % index, ends[index], center + "-w_feed/2", "lead", "w_feed")
+        ports.append((ends[index] + "+lead", center))
+    xmin, xmax, ymin, ymax = "-lead", "(" + ends[0] + "+" + ends[1] + "+abs((" + ends[0] + ")-(" + ends[1] + ")))/2+lead", "bot_y-pitch", "top_y+pitch"
+    editor.Unite(["NAME:Selections", "Selections:=", ",".join(metal)],
+                 ["NAME:UniteParameters", "KeepOriginals:=", False])
+    if kind != "tee":
+        variable("pad_len", "(w2+w3-abs(w2-w3))/4")
+        sheet("IsolationSheet", "joint_x-pad_len", "bot_y+w3/2", "sub_h", "pad_len",
+              "top_y-w2/2-bot_y-w3/2")
+        boundary.AssignLumpedRLC(["NAME:Isolation", "Objects:=", ["IsolationSheet"],
+            ["NAME:CurrentLine"] + across_sheet("IsolationSheet", 1),
+            "RLC Type:=", "Parallel", "UseResist:=", True, "Resistance:=", "r_iso",
+            "UseInduct:=", False, "UseCap:=", False])
+
+for name, value in [("pcb_x", xmin + "-4*sub_h"), ("pcb_y", ymin + "-4*sub_h"),
+                    ("pcb_len", xmax + "+4*sub_h-pcb_x"), ("pcb_w", ymax + "+4*sub_h-pcb_y")]:
+    variable(name, value)
+editor.CreateBox(["NAME:BoxParameters", "XPosition:=", "pcb_x", "YPosition:=", "pcb_y",
+    "ZPosition:=", "0mm", "XSize:=", "pcb_len", "YSize:=", "pcb_w", "ZSize:=", "sub_h"],
+    attributes("Substrate", "BoardDielectric", True))
+sheet("Ground", "pcb_x", "pcb_y", "0mm", "pcb_len", "pcb_w")
+boundary.AssignPerfectE(["NAME:PerfectMetal", "Objects:=", [metal[0], "Ground"], "InfGroundPlane:=", False])
+for index, (xpos, center) in enumerate(ports, 1):
+    port(index, xpos, center)
+
+variable("air_pad", "299792458m_per_sec/(4*sweep_lo)")
+region = ["NAME:RegionParameters"]
+for direction in ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]:
+    region.extend([direction + "PaddingType:=", "Absolute Offset", direction + "Padding:=", "air_pad"])
+editor.CreateRegion(region, attributes("Region", "vacuum", True))
+boundary.AssignRadiation(["NAME:OpenBoundary", "Objects:=", ["Region"]])
+
+analysis = design.GetModule("AnalysisSetup")
+analysis.InsertSetup("HfssDriven", ["NAME:Setup1", "Frequency:=", dict(variables)["freq0"], "MaxDeltaS:=", 0.02,
+                     "MaximumPasses:=", 12, "MinimumPasses:=", 2, "MinimumConvergedPasses:=", 2])
+analysis.InsertFrequencySweep("Setup1", ["NAME:Sweep", "IsEnabled:=", True, "RangeType:=", "LinearCount",
+    "RangeStart:=", "sweep_lo", "RangeEnd:=", "sweep_hi", "RangeCount:=", point_count,
+    "Type:=", "Interpolating", "SaveFields:=", False])
+reports = design.GetModule("ReportSetup")
+
+
+def report(title, expressions):
+    reports.CreateReport(title, "Modal Solution Data", "Rectangular Plot", "Setup1 : Sweep",
+        ["Domain:=", "Sweep"], ["Freq:=", ["All"]], ["X Component:=", "Freq", "Y Component:=", expressions])
+
+
+report("Reflection (dB)", ["dB(S(P%d,P%d))" % (idx, idx) for idx in range(1, len(ports)+1)])
+report("Transmission (dB)", ["dB(S(P%d,P1))" % idx for idx in range(2, len(ports)+1)])
+report("Transmission phase (deg)", ["ang_deg(S(P%d,P1))" % idx for idx in range(2, len(ports)+1)])
+if len(ports) == 3:
+    report("Output isolation (dB)", ["-dB(S(P2,P3))"])
+    report("Output power ratio P3 over P2", ["mag(S(P3,P1)/S(P2,P1))*mag(S(P3,P1)/S(P2,P1))"])
+    report("Output phase difference (deg)", ["ang_deg(S(P3,P1)/S(P2,P1))"])
+editor.FitAll()
+base = os.path.splitext(os.path.abspath(__file__))[0]
+target = base + ".aedt"
+suffix = 2
+while os.path.exists(target) or os.path.exists(target + ".lock"):
+    target = base + "_%d.aedt" % suffix
+    suffix += 1
+project.SaveAs(target, False)

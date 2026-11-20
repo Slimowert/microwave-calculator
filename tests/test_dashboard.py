@@ -45,6 +45,13 @@ def test_dashboard_navigation_display_controls_and_resizing(monkeypatch):
         assert window.result is result
         window.advanced_button.click()
         assert not window.advanced_container.isHidden()
+        window.advanced_button.click()
+        window.fields["count"][0].setText("x")
+        window.calculate_button.click()
+        assert not window.advanced_container.isHidden()
+        assert window.fields["count"][0].hasFocus()
+        window.fields["count"][0].setText("101")
+        window.calculate_button.click()
         for index in (3, 1, 4, 5, 6, 0):
             window.navigation[index][0].click()
             assert window.tabs.currentIndex() == index
