@@ -19,14 +19,15 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QHeaderView,
     QLineEdit,
     QMainWindow,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QStyle,
     QStyleOptionButton,
+    QStyleOptionComboBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -36,16 +37,14 @@ from PySide6.QtWidgets import (
 
 from .core import InputError, Result, divider, microstrip, transformer
 from .desktop_style import STYLE, Sidebar, card, icon
-from .export import write_csv, write_json
-from .extended import lowpass, multi_divider
+from .export import write_csv
+from .extended import lowpass, multi_divider, synthesize_wilkinson
 from .hfss import HFSS_KINDS, write_hfss
 from .plots import (
-    book_figure,
     plot_dashboard_trace,
     plot_power,
     plot_response,
     plot_schematic,
-    plot_topology_preview,
 )
 
 
@@ -54,10 +53,8 @@ DEVICES = {
     "microstrip_synthesis": "Микрополосковая линия · синтез",
     "transformer": "Четвертьволновой трансформатор",
     "tee": "Т-делитель",
-    "wilkinson_equal": "Wilkinson 1:1",
-    "wilkinson_unequal": "Wilkinson · неравное деление",
+    "wilkinson_equal": "Уилкинсон",
     "resistive": "Резистивный делитель",
-    "wilkinson_sections": "Wilkinson · 1–8 секций",
     "butterworth": "ФНЧ Баттерворта",
     "chebyshev": "ФНЧ Чебышёва",
 }
@@ -76,8 +73,6 @@ FIELDS = {
     "start": ("Начальная частота fmin", "1,2", FREQUENCY),
     "stop": ("Конечная частота fmax", "3,6", FREQUENCY),
     "count": ("Число точек N", "1001", ("1",)),
-    "impedances": ("Z секций, Ом", "50.2835214;52.26305344;58.57082316;70.71067812;85.36673603;95.66987903;99.43615444", ("Ом",)),
-    "resistances": ("R секций, Ом", "8867.676398;652.6363658;424.8722393;208.042083;120.5338472;70.66287939;96.22736412", ("Ом",)),
     "order": ("Порядок фильтра n", "3", ("1",)),
     "ripple": ("Пульсации Ap", "0,5", ("дБ",)),
 }
@@ -114,6 +109,18 @@ class CheckBox(QCheckBox):
 
 
 class UnitComboBox(QComboBox):
+    def fit_unit_text(self) -> None:
+        self.ensurePolished()
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.rect.setWidth(self.sizeHint().width())
+        label_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, self
+        )
+        longest = max(self.fontMetrics().horizontalAdvance(self.itemText(i)) for i in range(self.count()))
+        padding = option.rect.width() - label_rect.width()
+        self.setMinimumWidth(longest + padding + 6)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -205,12 +212,12 @@ class CalculatorWindow(QMainWindow):
         layout.addSpacing(40)
         self.navigation = {}
         for title, symbol, index in (
-            ("Главная", "home", 6),
+            ("Главная", "home", 5),
             ("Расчёт", "calculator", 0),
-            ("Частотный анализ", "wave", 3),
-            ("S-параметры", "matrix", 1),
-            ("Экспорт", "download", 4),
-            ("Справка", "help", 5),
+            ("Частотный анализ", "wave", 2),
+            ("Подробности", "calculator", 1),
+            ("Экспорт", "download", 3),
+            ("Справка", "help", 4),
         ):
             button = QPushButton(title)
             button.setObjectName("navigation")
@@ -250,17 +257,12 @@ class CalculatorWindow(QMainWindow):
         reset.setIcon(icon("reset", "#19233d", 19))
         reset.clicked.connect(self.rebuild_form)
         layout.addWidget(reset)
-        for extension in ("JSON", "CSV", "PNG"):
-            button = self._export_button(extension)
-            self.exports[extension] = button
-            if extension != "PNG":
-                layout.addWidget(button)
         return toolbar
 
-    def _export_button(self, extension: str) -> QPushButton:
+    def _export_button(self, extension: str, *, schematic: bool = False) -> QPushButton:
         button = QPushButton(f"  Экспорт {extension}")
         button.setIcon(icon("download", "#19233d", 19))
-        button.clicked.connect(lambda checked=False, ext=extension: self.save(ext))
+        button.clicked.connect(lambda checked=False, ext=extension: self.save(ext, schematic=schematic))
         self.export_actions.append((extension, button))
         return button
 
@@ -287,52 +289,28 @@ class CalculatorWindow(QMainWindow):
         self.metrics.setSpacing(7)
         self.results_card = card("Результаты расчёта", overview)
         results.addWidget(self.results_card)
-        self.matrix = QTableWidget()
-        self.matrix.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.matrix.setAlternatingRowColors(True)
-        self.matrix.setWordWrap(False)
-        self.matrix.setShowGrid(True)
-        self.matrix.verticalHeader().setDefaultSectionSize(27)
-        self.matrix.verticalHeader().setMinimumSectionSize(25)
-        self.matrix.setMinimumHeight(118)
-        self.matrix.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.matrix_card = card("S-матрица", self.matrix, "matrix")
-        results.addWidget(self.matrix_card, 1)
-        self.model = QLabel()
-        self.model.setWordWrap(True)
-        self.model.setObjectName("notice")
-        self.model.setMinimumHeight(35)
-        self.warning_card = card("Предупреждения", self.model, "warning")
-        results.addWidget(self.warning_card)
+        self.mini_scheme = canvas()
+        self.scheme_card = card("Мини-схема", self.mini_scheme, "scheme")
+        self.scheme_export = self._export_button("PNG", schematic=True)
+        self.scheme_card.header_layout.addWidget(self.scheme_export)
+        results.addWidget(self.scheme_card, 1)
         top_layout.addWidget(right, 54)
         top.setMinimumHeight(395)
         layout.addWidget(top, 11)
-        bottom = QWidget()
+        bottom = self.chart_row = QWidget()
         bottom.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         bottom_layout = QHBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(12)
         self.preview = canvas()
         self.reflection = canvas()
-        self.preview_card = card("|S₂₁|, |S₃₁| по частоте", self.preview, "wave")
-        self.reflection_card = card("Отражение и связь выходов", self.reflection, "wave")
+        self.preview_card = card("S₂₁ по частоте", self.preview, "wave")
+        self.reflection_card = card("КСВ по портам", self.reflection, "wave")
         bottom_layout.addWidget(self.preview_card, 1)
         bottom_layout.addWidget(self.reflection_card, 1)
-        side = QWidget()
-        side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(10)
-        self.mini_scheme = canvas()
-        self.scheme_card = card("Схема (Wilkinson 1:1)", self.mini_scheme, "scheme")
-        open_scheme = QPushButton("Открыть")
-        open_scheme.setObjectName("textButton")
-        open_scheme.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
-        self.scheme_card.header_layout.addWidget(open_scheme)
-        side_layout.addWidget(self.scheme_card, 1)
         self.balance = canvas()
         self.balance_card = card("Баланс мощности", self.balance, "pie")
-        side_layout.addWidget(self.balance_card, 1)
-        bottom_layout.addWidget(side, 1)
+        bottom_layout.addWidget(self.balance_card, 1)
         bottom.setMinimumHeight(340)
         layout.addWidget(bottom, 10)
         scroll = QScrollArea()
@@ -342,13 +320,8 @@ class CalculatorWindow(QMainWindow):
 
     def _build_parameters(self) -> QWidget:
         content = QWidget()
-        panel = QHBoxLayout(content)
-        panel.setContentsMargins(2, 2, 2, 2)
-        panel.setSpacing(13)
-        controls = QWidget()
-        controls.setMinimumWidth(280)
-        fields_layout = QVBoxLayout(controls)
-        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout = QVBoxLayout(content)
+        fields_layout.setContentsMargins(2, 2, 2, 2)
         fields_layout.setSpacing(8)
         self.form = QFormLayout()
         self.form.setVerticalSpacing(10)
@@ -359,10 +332,10 @@ class CalculatorWindow(QMainWindow):
         self.device.setAccessibleName("Тип устройства")
         for key, label in DEVICES.items():
             self.device.addItem(label, key)
-        self.show_matrix = CheckBox("Показать S-матрицу")
-        self.show_matrix.setChecked(True)
-        self.show_matrix.toggled.connect(self._update_view_options)
-        fields_layout.addWidget(self.show_matrix)
+        self.device_description = QLabel()
+        self.device_description.setObjectName("muted")
+        self.device_description.setWordWrap(True)
+        fields_layout.addWidget(self.device_description)
         self.show_sweep = CheckBox("Частотные графики")
         self.show_sweep.setChecked(True)
         self.show_sweep.toggled.connect(self._update_view_options)
@@ -388,33 +361,6 @@ class CalculatorWindow(QMainWindow):
         self.feedback.setWordWrap(True)
         fields_layout.addStretch()
         fields_layout.addWidget(self.feedback)
-        panel.addWidget(controls, 3)
-        miniature = QWidget()
-        miniature.setObjectName("miniPreview")
-        miniature.setMinimumWidth(135)
-        miniature.setMaximumWidth(210)
-        mini_layout = QVBoxLayout(miniature)
-        mini_layout.setContentsMargins(8, 10, 8, 10)
-        mini_layout.setSpacing(5)
-        mini_title = QLabel("Мини-схема")
-        mini_title.setObjectName("miniTitle")
-        mini_title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        mini_layout.addWidget(mini_title)
-        self.parameter_scheme = canvas()
-        self.parameter_scheme.setMaximumHeight(220)
-        mini_layout.addWidget(self.parameter_scheme, 1)
-        self.device_name = QLabel()
-        self.device_name.setObjectName("deviceName")
-        self.device_name.setWordWrap(True)
-        self.device_name.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        mini_layout.addWidget(self.device_name)
-        self.device_description = QLabel()
-        self.device_description.setObjectName("deviceDescription")
-        self.device_description.setWordWrap(True)
-        self.device_description.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.device_description.setMinimumHeight(50)
-        mini_layout.addWidget(self.device_description)
-        panel.addWidget(miniature, 2)
         return card("Параметры", content, "settings")
 
     def _build_result_pages(self) -> None:
@@ -423,27 +369,8 @@ class CalculatorWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.tabs.addTab(card("S-параметры и подробные результаты", self.table, "matrix"), "Подробности")
-        self.schematic = canvas()
+        self.tabs.addTab(card("Подробные результаты", self.table, "calculator"), "Подробности")
         self.response = canvas()
-        scheme = QWidget()
-        scheme_layout = QVBoxLayout(scheme)
-        scheme_layout.setContentsMargins(5, 0, 5, 0)
-        controls = QHBoxLayout()
-        self.scheme_view = UnitComboBox()
-        self.scheme_view.addItem("Расчётная схема", "calculated")
-        self.scheme_view.addItem("Из учебника", "book")
-        self.scheme_view.currentIndexChanged.connect(self.update_schematic)
-        controls.addWidget(self.scheme_view)
-        controls.addStretch()
-        controls.addWidget(self.exports["PNG"])
-        scheme_layout.addLayout(controls)
-        self.scheme_note = QLabel()
-        self.scheme_note.setWordWrap(True)
-        self.scheme_note.setObjectName("muted")
-        scheme_layout.addWidget(self.scheme_note)
-        scheme_layout.addWidget(card("Схема устройства", self.schematic, "scheme"), 1)
-        self.tabs.addTab(scheme, "Схема")
         self.tabs.addTab(card("Частотный анализ", self.response, "wave"), "Графики")
 
     def _build_export_page(self) -> None:
@@ -455,9 +382,8 @@ class CalculatorWindow(QMainWindow):
         note.setObjectName("cardTitle")
         layout.addWidget(note)
         for extension, title, description in (
-            ("JSON", "Исходные данные и результаты", "Параметры устройства, номиналы элементов и комплексная S-матрица на f₀."),
             ("CSV", "Частотные характеристики", "Все точки частотной сетки для анализа в Excel, Python и других приложениях."),
-            ("PNG", "Графики и схемы", "Частотные графики. Для сохранения схемы откройте её и нажмите «Экспорт PNG»."),
+            ("PNG", "Графики и схемы", "Частотные графики или мини-схема для расчёта без частотной сетки."),
             ("HFSS", "3D-модель для Ansys HFSS", "Скрипт .py для линии, Т-делителя или двухвыходного Wilkinson. "
              "В Electronics Desktop: Tools → Run Script. Затем Analyze All для построения графиков."),
         ):
@@ -472,7 +398,8 @@ class CalculatorWindow(QMainWindow):
             body.setObjectName("muted")
             text.addWidget(body)
             line.addLayout(text, 1)
-            line.addWidget(self._export_button(extension))
+            self.exports[extension] = self._export_button(extension)
+            line.addWidget(self.exports[extension])
             layout.addWidget(row)
         layout.addStretch()
         self.tabs.addTab(card("Экспорт расчёта", content, "download"), "Экспорт")
@@ -487,16 +414,12 @@ class CalculatorWindow(QMainWindow):
             "r = P₃/P₂ — отношение выходных мощностей. Параметры подложки и число "
             "точек частотной сетки доступны в раскрывающемся блоке.</p>"
             "<h3>Результаты</h3>"
-            "<p>S-матрица показана на рабочей частоте. Графики описывают поведение "
-            "в заданном диапазоне; оранжевая линия отмечает f₀. Return Loss — "
-            "возвратные потери, Isolation — развязка выходов. Для идеального "
-            "согласования значения ограничены порогом отображения 100 дБ.</p>"
+            "<p>На графиках показаны передача S₂₁ в дБ и КСВ по портам. "
+            "Пунктир отмечает f₀. Для трансформатора с заданной нагрузкой "
+            "показаны отражение и КСВ на входе.</p>"
             "<h3>Модель</h3>"
             "<p>Используются аналитические модели с идеальными соединениями. "
-            "Потери, дисперсия и паразитные эффекты не учитываются. Ограничения "
-            "текущего расчёта приведены в блоке «Предупреждения».</p>"
-            "<p>На странице схемы можно переключиться между расчётной топологией "
-            "и иллюстрацией из Microwave Engineering, D. M. Pozar, 4-е издание.</p>"
+            "Потери, дисперсия и паразитные эффекты не учитываются.</p>"
         )
         text.setWordWrap(True)
         text.setMargin(20)
@@ -521,9 +444,8 @@ class CalculatorWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(14)
         for position, (kind, title) in enumerate((
-            ("wilkinson_equal", "Wilkinson 1:1"),
-            ("wilkinson_unequal", "Неравный делитель"),
-            ("wilkinson_sections", "Многосекционный Wilkinson"),
+            ("wilkinson_equal", DEVICES["wilkinson_equal"]),
+            ("tee", "Т-делитель"),
             ("microstrip_synthesis", "Микрополосковая линия"),
             ("transformer", "Трансформатор λ/4"),
             ("butterworth", "LC-фильтр нижних частот"),
@@ -544,20 +466,19 @@ class CalculatorWindow(QMainWindow):
         self.calculate()
 
     def _sync_navigation(self, index: int) -> None:
-        active = 0 if index == 2 else index
         titles = {
-            0: "Калькулятор делителей мощности", 1: "S-параметры и результаты",
-            2: "Схема устройства", 3: "Частотный анализ", 4: "Экспорт расчёта",
-            5: "Справка", 6: "Расчётные модули",
+            0: "Калькулятор делителей мощности", 1: "Подробные результаты",
+            2: "Частотный анализ", 3: "Экспорт расчёта",
+            4: "Справка", 5: "Расчётные модули",
         }
         title = titles.get(index, titles[0])
         self.headline.setToolTip(title)
         if self.width() < 1320:
-            title = {0: "Калькулятор СВЧ", 1: "S-параметры"}.get(index, title)
+            title = {0: "Калькулятор СВЧ", 1: "Подробности"}.get(index, title)
         self.headline.setText(title)
         for target, (button, symbol) in self.navigation.items():
-            button.setChecked(active == target)
-            button.setIcon(icon(symbol, "white" if active == target else "#19233d"))
+            button.setChecked(index == target)
+            button.setIcon(icon(symbol, "white" if index == target else "#19233d"))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -569,12 +490,10 @@ class CalculatorWindow(QMainWindow):
         self.advanced_button.setText(("▾ " if expanded else "▸ ") + "Подложка и точность")
 
     def _update_view_options(self) -> None:
-        result = self.result
-        has_s = result is not None and result.center_s is not None
-        self.matrix_card.setVisible(has_s and self.show_matrix.isChecked())
-        has_sweep = result is not None and result.frequency is not None
-        self.preview_card.setVisible(has_sweep and self.show_sweep.isChecked())
-        self.reflection_card.setVisible(has_sweep and self.show_sweep.isChecked())
+        show_charts = "start" in self.fields and self.show_sweep.isChecked()
+        self.preview_card.setVisible(show_charts)
+        self.reflection_card.setVisible(show_charts)
+        self.chart_row.setVisible(show_charts or not self.balance_card.isHidden())
 
     def _set_feedback(self, message: str, state: str = "") -> None:
         self.feedback.setText(message)
@@ -587,29 +506,26 @@ class CalculatorWindow(QMainWindow):
         self.feedback.style().polish(self.feedback)
 
     @Slot()
-    def invalidate(self) -> None:
+    def invalidate(self, *, refresh_plots: bool = False) -> None:
+        refresh_plots = refresh_plots or self.result is not None
         self.result = None
         self.table.setRowCount(0)
-        self.matrix.setRowCount(0)
-        self.matrix.setColumnCount(0)
         self.set_metrics((("Результат", "—"), ("Частота f₀", "—")))
-        self.matrix_card.hide()
         self.balance_card.hide()
-        self.preview_card.hide()
-        self.reflection_card.hide()
-        self.model.setText("Задайте параметры устройства и выполните расчёт.")
-        for view in (
-            self.schematic, self.response, self.preview, self.reflection,
-            self.mini_scheme, self.balance,
-        ):
-            view.figure.clear()
-            view.draw_idle()
+        self._update_view_options()
+        if refresh_plots:
+            for view in (self.mini_scheme, self.balance):
+                view.figure.clear()
+                view.draw_idle()
+            if "start" in self.fields:
+                self._render_frequency_plots(None)
         for _, button in self.export_actions:
             button.setEnabled(False)
-        for index in (1, 2, 3):
-            self.tabs.setTabEnabled(index, False)
-        for index in (1, 3):
-            self.navigation[index][0].setEnabled(False)
+        self.tabs.setTabEnabled(1, False)
+        self.navigation[1][0].setEnabled(False)
+        has_sweep = "start" in self.fields
+        self.tabs.setTabEnabled(2, has_sweep)
+        self.navigation[2][0].setEnabled(has_sweep)
         self._set_feedback("Изменены параметры. Нажмите «Рассчитать».")
 
     def set_metrics(self, metrics: Iterable[tuple[str, str]]) -> None:
@@ -641,29 +557,6 @@ class CalculatorWindow(QMainWindow):
             self.metrics.setColumnStretch(index % columns, 1)
 
     @Slot()
-    def update_schematic(self) -> None:
-        if self.result is not None:
-            self.render_schematic(self.result)
-
-    def render_schematic(self, result: Result) -> None:
-        self.scheme_view.setEnabled(result.kind != "wilkinson_sections")
-        if result.kind == "wilkinson_sections" or self.scheme_view.currentData() == "calculated":
-            self.scheme_note.clear()
-            plot_schematic(self.schematic.figure, result)
-        else:
-            book_figure(self.schematic.figure, result)
-            if result.kind == "wilkinson_unequal":
-                note = "На рисунке показаны внутренние нагрузки. Выходные трансформаторы программы видны в расчётной схеме."
-            elif result.kind == "tee":
-                note = "На рисунке — модель Т-соединения. В расчёте используются идеальное соединение и четвертьволновые ветви."
-            elif result.kind in FILTERS:
-                note = "На рисунке — пример ФНЧ второго порядка. Выбранный порядок виден в расчётной схеме."
-            else:
-                note = "Параметры на рисунке условные. Номиналы проекта видны в расчётной схеме и на вкладке «Подробности»."
-            self.scheme_note.setText(note)
-        self.schematic.draw_idle()
-
-    @Slot()
     def rebuild_form(self) -> None:
         # Keep the device selector alive when rebuilding the dynamic form.
         for form in (self.form, self.advanced_form):
@@ -688,6 +581,11 @@ class CalculatorWindow(QMainWindow):
         device_label.ensurePolished()
         device_label.setMinimumWidth(device_label.sizeHint().width())
         self.form.addRow(device_label, self.device)
+        if kind == "wilkinson_equal":
+            self.section_count = QSpinBox()
+            self.section_count.setRange(1, 8)
+            self.section_count.setAccessibleName("Количество секций в плече")
+            self.form.addRow("Секций в плече", self.section_count)
         if kind.startswith("microstrip"):
             keys = ["f0", "h", "er", "width" if kind.endswith("analysis") else "z0"]
         elif kind == "transformer":
@@ -701,9 +599,7 @@ class CalculatorWindow(QMainWindow):
             keys = ["z0", "f0", "start", "stop", "count"]
         else:
             keys = ["z0", "f0", "h", "er"]
-            if kind == "wilkinson_sections":
-                keys.extend(("impedances", "resistances"))
-            else:
+            if kind == "tee":
                 keys.append("ratio")
             keys.extend(("start", "stop", "count"))
         self.fields = {}
@@ -717,16 +613,14 @@ class CalculatorWindow(QMainWindow):
             }.get(key, label)
             if kind in FILTERS and key == "f0":
                 label = "Граница f₀"
-            entry = QLineEdit("2" if key == "ratio" and kind == "wilkinson_unequal" else default)
-            if kind == "wilkinson_sections":
-                entry.setText({"f0": "5,5", "start": "4,9", "stop": "6", "count": "201"}.get(key, default))
+            entry = QLineEdit(default)
             entry.setAccessibleName(label)
             entry.setMinimumWidth(44)
             if len(units) > 1:
                 unit = UnitComboBox()
                 unit.addItems(units)
                 unit.setCurrentIndex(len(units) - 1)
-                unit.setFixedWidth(80)
+                unit.fit_unit_text()
                 unit.currentIndexChanged.connect(self.invalidate)
             else:
                 unit = QLabel("" if units[0] in ("1", "Ом") else units[0])
@@ -751,44 +645,32 @@ class CalculatorWindow(QMainWindow):
                 field_label.ensurePolished()
                 field_label.setMinimumWidth(field_label.sizeHint().width())
                 self.form.addRow(field_label, row)
-            if key == "ratio" and kind == "wilkinson_equal":
-                entry.setEnabled(False)
-                entry.setToolTip("Wilkinson 1:1 делит мощность поровну.")
             entry.textChanged.connect(self.invalidate)
             self.fields[key] = (entry, unit)
         has_sweep = "start" in self.fields
         self.show_sweep.setVisible(has_sweep)
         self.sweep_container.setVisible(has_sweep)
-        self.show_matrix.setVisible(not kind.startswith("microstrip") and kind != "transformer")
         self.advanced_button.setVisible(self.advanced_form.rowCount() > 0)
         self.advanced_container.setVisible(self.advanced_button.isChecked() and self.advanced_form.rowCount() > 0)
-        self.device_name.setText(DEVICES[kind])
         self.device.setToolTip(DEVICES[kind])
         descriptions = {
-            "wilkinson_equal": "Два равных выхода с согласованием и развязкой портов.",
-            "wilkinson_unequal": "Два выхода с заданным отношением мощностей.",
-            "wilkinson_sections": "Два выхода. Введите Z и R через «;», начиная с выходов. Число пар = число секций.",
-            "tee": "Четвертьволновые ветви без развязывающего резистора.",
+            "wilkinson_equal": "Калькулятор подбирает Z и R автоматически. Номиналы доступны в разделе «Подробности».",
+            "tee": "Задайте отношение мощностей P₃/P₂. Значение 1 даёт равное деление.",
             "resistive": "Широкополосный резистивный делитель на два выхода.",
             "transformer": "Согласование нагрузки участком линии длиной λ/4.",
             "butterworth": "Максимально плоская характеристика в полосе пропускания.",
             "chebyshev": "Заданная пульсация и крутой спад за полосой пропускания.",
         }
         self.device_description.setText(descriptions.get(kind, "Анализ и синтез геометрии микрополосковой линии."))
-        reference_kind = "microstrip" if kind.startswith("microstrip") else kind
-        reference = Result(reference_kind, {}, {}, "", 1.0)
-        plot_topology_preview(self.parameter_scheme.figure, reference)
-        self.parameter_scheme.draw_idle()
-        self.invalidate()
+        if kind == "wilkinson_equal":
+            self.section_count.valueChanged.connect(self.invalidate)
+        self.invalidate(refresh_plots=True)
 
     def read_fields(self) -> dict[str, int | float]:
         data = {}
         for key, (entry, unit) in self.fields.items():
             raw = entry.text().strip().replace(",", ".")
             try:
-                if key in ("impedances", "resistances"):
-                    data[key] = tuple(float(item) for item in raw.split(";"))
-                    continue
                 unit_name = (
                     unit.currentText() if isinstance(unit, QComboBox) else unit.text()
                 )
@@ -815,6 +697,8 @@ class CalculatorWindow(QMainWindow):
         try:
             p = self.read_fields()
             kind = self.device.currentData()
+            if kind == "wilkinson_equal" and self.section_count.value() > 1:
+                kind = "wilkinson_sections"
             if kind == "microstrip_analysis":
                 result = microstrip(p["h"], p["er"], p["f0"], width=p["width"])
             elif kind == "microstrip_synthesis":
@@ -840,7 +724,12 @@ class CalculatorWindow(QMainWindow):
                     p["stop"],
                     p["count"],
                 )
-            elif kind in ("resistive", "wilkinson_sections"):
+            elif kind == "wilkinson_sections":
+                result = synthesize_wilkinson(
+                    self.section_count.value(), p["z0"], p["h"], p["er"],
+                    p["f0"], p["start"], p["stop"], p["count"],
+                )
+            elif kind == "resistive":
                 result = multi_divider(
                     kind,
                     p["z0"],
@@ -850,7 +739,6 @@ class CalculatorWindow(QMainWindow):
                     p["start"],
                     p["stop"],
                     p["count"],
-                    impedances=p.get("impedances", ()), resistances=p.get("resistances", ()),
                 )
             else:
                 result = divider(
@@ -886,48 +774,28 @@ class CalculatorWindow(QMainWindow):
 
     def show_result(self, result: Result) -> None:
         """Populate the result tabs and overview for a calculation."""
-        rows = self._detail_rows(result)
-        if result.center_s is not None:
-            rows.extend(self._render_matrix(result.center_s))
-        self._render_details(rows)
+        self._render_details(self._detail_rows(result))
         self._render_metrics(result)
-        notice = (
-            "Идеализированная модель. Не учитываются потери линий и паразитные эффекты."
-            if result.kind not in ("microstrip", "resistive")
-            else result.model.split("\n")[0]
-        )
-        if result.kind == "tee":
-            notice += " Т-соединение не обеспечивает развязку выходов."
-        self.model.setText(notice)
-        self.model.setToolTip(result.model)
-        self.render_schematic(result)
         plot_schematic(self.mini_scheme.figure, result, compact=True)
-        self.scheme_card.title.setText(f"Схема ({DEVICES[self.device.currentData()]})")
-        self.matrix_card.title.setText(f"S-матрица (на f₀ = {result.f0 / 1e9:.3f} ГГц)")
         if result.frequency is not None:
-            plot_dashboard_trace(self.preview.figure, result)
-            plot_dashboard_trace(self.reflection.figure, result, reflection=True)
-            if result.center_s is None:
-                titles = ("Коэффициент отражения |Γ|", "КСВН по частоте")
-            elif result.center_s.shape[0] == 2:
-                titles = ("Передача |S₂₁| по частоте", "Отражение |S₁₁| по частоте")
-            else:
-                titles = ("Передача на выходы по частоте", "Отражение и связь выходов")
-            self.preview_card.title.setText(titles[0])
-            self.reflection_card.title.setText(titles[1])
+            self._render_frequency_plots(result)
         if result.center_s is not None and result.center_s.shape[0] >= 3:
             self.balance_card.show()
             plot_power(self.balance.figure, result)
-        for view in (self.mini_scheme, self.preview, self.reflection, self.balance):
+        for view in (self.mini_scheme, self.balance):
             view.draw_idle()
         self.tabs.setTabEnabled(1, True)
-        self.tabs.setTabEnabled(2, True)
         self.navigation[1][0].setEnabled(True)
-        if result.frequency is not None:
-            plot_response(self.response.figure, result)
-            self.response.draw_idle()
-            self.tabs.setTabEnabled(3, True)
-            self.navigation[3][0].setEnabled(True)
+
+    def _render_frequency_plots(self, result: Result | None) -> None:
+        transformer = self.device.currentData() == "transformer"
+        self.preview_card.title.setText("Отражение |Γ| по частоте" if transformer else "S₂₁ по частоте")
+        self.reflection_card.title.setText("КСВ на входе" if transformer else "КСВ по портам")
+        plot_dashboard_trace(self.preview.figure, result, transformer=transformer)
+        plot_dashboard_trace(self.reflection.figure, result, reflection=True, transformer=transformer)
+        plot_response(self.response.figure, result, transformer=transformer)
+        for view in (self.preview, self.reflection, self.response):
+            view.draw_idle()
 
     @staticmethod
     def _detail_rows(result: Result) -> list[tuple[str, float | str]]:
@@ -961,35 +829,6 @@ class CalculatorWindow(QMainWindow):
                     (f"{name} · длина, мм", section["length_m"] * 1e3),
                 )
             )
-        return rows
-
-    def _render_matrix(self, scattering: np.ndarray) -> list[tuple[str, str]]:
-        rows = []
-        n = scattering.shape[0]
-        self.matrix.setRowCount(n)
-        self.matrix.setColumnCount(n + 1)
-        self.matrix.verticalHeader().hide()
-        self.matrix.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch if n <= 4 else QHeaderView.ResizeMode.ResizeToContents
-        )
-        subscript = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
-        headers = ["S" + str(port + 1).translate(subscript) for port in range(n)]
-        self.matrix.setHorizontalHeaderLabels(["Порт"] + headers)
-        self.matrix.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        for i in range(n):
-            port = QTableWidgetItem(headers[i])
-            port.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.matrix.setItem(i, 0, port)
-            for j in range(n):
-                value = scattering[i, j]
-                real = 0.0 if abs(value.real) < 0.00005 else value.real
-                imag = 0.0 if abs(value.imag) < 0.00005 else value.imag
-                label = f"{real:.4f} {'−' if imag < 0 else '+'} j{abs(imag):.4f}"
-                cell = QTableWidgetItem(label)
-                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.matrix.setItem(i, j + 1, cell)
-                rows.append((f"S{i + 1}{j + 1} на f₀", label))
-        self.matrix.show()
         return rows
 
     def _render_details(self, rows: list[tuple[str, float | str]]) -> None:
@@ -1031,7 +870,7 @@ class CalculatorWindow(QMainWindow):
                 metrics.append((label if separator else name, f"{value:.4g} {unit}".rstrip()))
         self.set_metrics(metrics[:8])
 
-    def save(self, extension: str) -> None:
+    def save(self, extension: str, *, schematic: bool = False) -> None:
         if self.result is None:
             return
         suffix = "py" if extension == "HFSS" else extension.lower()
@@ -1046,16 +885,14 @@ class CalculatorWindow(QMainWindow):
         if Path(path).suffix.lower() != f".{suffix}":
             path += f".{suffix}"
         try:
-            if extension == "JSON":
-                write_json(path, self.result)
-            elif extension == "CSV":
+            if extension == "CSV":
                 write_csv(path, self.result)
             elif extension == "HFSS":
                 write_hfss(path, self.result)
             else:
                 canvas = (
-                    self.schematic
-                    if self.tabs.currentIndex() == 2 or self.result.frequency is None
+                    self.mini_scheme
+                    if schematic or self.result.frequency is None
                     else self.response
                 )
                 canvas.figure.savefig(path, dpi=170)

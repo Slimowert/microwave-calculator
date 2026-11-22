@@ -48,10 +48,10 @@ QPushButton#disclosure, QPushButton#textButton { border: 0; background: transpar
     color: #345478; text-align: left; padding: 4px 0; font-size: 12px; min-height: 19px; }
 QPushButton#textButton { color: #0757c9; }
 QPushButton#moduleButton { text-align: left; padding: 20px; font-size: 14px; }
-QLineEdit, QComboBox { background: #ffffff; border: 1px solid #d2ddec; border-radius: 5px;
+QLineEdit, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #d2ddec; border-radius: 5px;
     padding: 5px 8px; min-height: 18px; selection-background-color: #d2e8ff; color: #14203a; }
-QLineEdit:hover, QComboBox:hover { border-color: #96b5e0; }
-QLineEdit:focus, QComboBox:focus { border-color: #1763e8; background: #fcfdff; }
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #96b5e0; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #1763e8; background: #fcfdff; }
 QLineEdit:disabled, QComboBox:disabled { background: #f1f4f9; color: #a0adc0; }
 QComboBox { padding-right: 24px; }
 QComboBox::drop-down { width: 23px; border: none; background: transparent; }
@@ -63,10 +63,6 @@ QCheckBox::indicator { width: 15px; height: 15px; }
 QCheckBox::indicator:unchecked { border: 1px solid #b9cbe1; background: #f9fbfe; border-radius: 3px; }
 QCheckBox::indicator:checked { border-radius: 3px; background: #0757d3; border: 1px solid #0757d3; }
 QCheckBox:disabled { color: #8997ad; }
-QWidget#miniPreview { background: #f3f6fb; border-radius: 7px; }
-QLabel#miniTitle { color: #566580; font-size: 11px; font-weight: 600; }
-QLabel#deviceName { font-size: 11px; font-weight: 700; }
-QLabel#deviceDescription { color: #65748c; font-size: 10px; }
 QLabel#notice { background: #e7f5ff; color: #23435e; border: 1px solid #caeaff;
     border-radius: 5px; padding: 8px 10px; font-size: 11px; }
 QTabWidget::pane { border: 0; }

@@ -309,54 +309,19 @@ def _plot_two_output_schematic(ax: Axes, result: Result, *, compact: bool) -> No
     ax.set(xlim=(0, 1), ylim=(0, 1))
 
 
-def plot_response(figure: Figure, result: Result) -> None:
-    """Plot the detailed frequency response or the schematic for a static result."""
+def plot_response(figure: Figure, result: Result | None, *, transformer: bool = False) -> None:
+    """Plot the frequency response or its axes while a calculation is pending."""
     figure.clear()
-    traces = {trace.name: trace for trace in result.traces}
-    if not traces:
+    if result is not None and result.frequency is None:
         plot_schematic(figure, result)
         return
-    if result.scattering is None:
-        groups = [("|Γ|",), ("КСВН",)]
-    elif "P3/P2" in traces:
-        groups = [
-            ("S11", "S22", "S33"),
-            ("S21", "S31", "S23"),
-            ("P3/P2",),
-            ("Разность фаз",),
-        ]
-    elif result.center_s.shape[0] == 2:
-        groups = [("S21",), ("S11",)]
-    else:
-        groups = [
-            tuple(name for name in traces if name.endswith("1") and name != "S11"),
-            tuple(name for name in traces if not name.endswith("1") or name == "S11"),
-        ]
-    frequency_ghz = result.frequency / 1e9
-    columns = 2 if len(groups) == 4 else 1
-    axes = figure.subplots(2, columns, squeeze=False)
-    for ax, group in zip(axes.flat, groups, strict=True):
-        for index, name in enumerate(group):
-            trace = traces[name]
-            if trace.unit == "дБ":
-                values = np.maximum(trace.values, DB_FLOOR)
-            else:
-                values = np.where(np.isfinite(trace.values), trace.values, np.nan)
-            ax.plot(
-                frequency_ghz,
-                values,
-                label=name,
-                lw=1.7,
-                color=SERIES[index % len(SERIES)],
-            )
-        if result.frequency[0] <= result.f0 <= result.frequency[-1]:
-            ax.axvline(result.f0 / 1e9, color="#777777", ls=":", label="f₀")
-        ax.set(
-            xlabel=f"Частота, ГГц (f₀ = {result.f0 / 1e9:.4g} ГГц)",
-            ylabel=f"дБ (порог {DB_FLOOR})" if trace.unit == "дБ" else trace.unit,
-        )
-        style_axes(ax)
-        ax.legend(fontsize=8, loc="best", frameon=False)
+
+    transformer = result.scattering is None if result is not None else transformer
+    transmission, vswr = figure.subplots(1, 2)
+    _plot_dashboard_trace(transmission, result, reflection=False, transformer=transformer)
+    _plot_dashboard_trace(vswr, result, reflection=True, transformer=transformer)
+    transmission.set_title("Отражение |Γ|" if transformer else "S₂₁ по частоте")
+    vswr.set_title("КСВ на входе" if transformer else "КСВ по портам")
 
 
 def plot_overview(figure: Figure, result: Result) -> None:
@@ -397,71 +362,99 @@ def plot_overview(figure: Figure, result: Result) -> None:
         ax.legend(fontsize=8, frameon=False)
 
 
-def plot_dashboard_trace(figure: Figure, result: Result, *, reflection: bool = False) -> None:
-    """Draw one dashboard chart, including the actual value at f₀."""
+def plot_dashboard_trace(
+    figure: Figure, result: Result | None, *, reflection: bool = False, transformer: bool = False,
+) -> None:
+    """Draw one dashboard chart, including the actual value at f₀ when available."""
     figure.clear()
-    ax = figure.subplots()
-    traces = {trace.name: trace for trace in result.traces}
-    if result.center_s is None:
-        names = ["КСВН"] if reflection else ["|Γ|"]
-    elif result.center_s.shape[0] == 2:
-        names = ["S11"] if reflection else ["S21"]
+    _plot_dashboard_trace(figure.subplots(), result, reflection=reflection, transformer=transformer)
+
+
+def _plot_dashboard_trace(
+    ax: Axes, result: Result | None, *, reflection: bool, transformer: bool,
+) -> None:
+    if result is None:
+        ylabel = "КСВ" if reflection else "|Γ|" if transformer else "Уровень, дБ"
+        ax.set(xlabel="Частота, ГГц", ylabel=ylabel, xlim=(0, 1), ylim=(0, 1))
+        ax.set_xticks(np.linspace(0, 1, 6), labels=[])
+        ax.set_yticks(np.linspace(0, 1, 6), labels=[])
+        style_axes(ax)
+        ax.text(
+            0.5, 0.5, "Нажмите «Рассчитать»", transform=ax.transAxes,
+            ha="center", va="center", color="#61718a", fontsize=9,
+            bbox=dict(facecolor="white", edgecolor="none", pad=4),
+        )
+        return
+
+    frequency_ghz = result.frequency / 1e9
+    center_ghz = result.f0 / 1e9
+    is_db = result.scattering is not None and not reflection
+
+    if result.scattering is None:
+        name = "КСВН" if reflection else "|Γ|"
+        trace = next(trace for trace in result.traces if trace.name == name)
+        values = trace.values
+        center_vswr = result.summary["КСВН на f₀"]
+        center = center_vswr if reflection else (center_vswr - 1) / (center_vswr + 1)
+        series = [(name, values, center)]
     elif reflection:
-        names = ["S11", "S23"]
+        gamma = np.abs(result.scattering.diagonal(axis1=1, axis2=2))
+        center_gamma = np.abs(result.center_s.diagonal())
+        series = [
+            (f"Порт {port}", _vswr(values), _vswr(center))
+            for port, (values, center) in enumerate(zip(gamma.T, center_gamma), start=1)
+        ]
     else:
-        names = [f"S{i}1" for i in range(2, result.center_s.shape[0] + 1)]
-    x = result.frequency / 1e9
-    center_labels = []
-    center_values = []
-    for index, name in enumerate(names):
-        if name not in traces:
-            continue
-        trace = traces[name]
-        is_db = trace.unit == "дБ"
-        values = np.maximum(trace.values, DB_FLOOR) if is_db else trace.values
-        label = name
-        if reflection and result.center_s is not None and result.center_s.shape[0] >= 3:
-            label = {"S11": "Отражение S₁₁", "S23": "Связь S₂₃"}.get(name, name)
-        ax.plot(x, values, label=label, color=SERIES[index % len(SERIES)],
-                lw=1.9, ls="-" if index % 2 == 0 else "--")
-        if result.center_s is not None and name.startswith("S"):
-            i, j = int(name[1]) - 1, int(name[2]) - 1
-            amplitude = abs(result.center_s[i, j])
-            value = max(DB_FLOOR, 20 * np.log10(max(amplitude, 1e-15)))
-            text = f"≤ {DB_FLOOR}" if amplitude <= 10 ** (DB_FLOOR / 20) else f"{value:.2f}"
-        else:
-            value = float(np.interp(result.f0 / 1e9, x, values))
-            text = f"{value:.3g}"
-        center_values.append(value)
-        center_labels.append(f"{name} = {text} {trace.unit}")
-    in_range = result.frequency[0] <= result.f0 <= result.frequency[-1]
-    if in_range:
-        ax.axvline(result.f0 / 1e9, color="#ff8527", ls="--", lw=0.9, alpha=0.9)
-        if center_values:
-            ax.plot(result.f0 / 1e9, center_values[0], "o", ms=6,
-                    mfc="white", mec="#ff7c12", mew=1.3, clip_on=False, zorder=5)
-            label = f"f₀ = {result.f0 / 1e9:.3f} ГГц"
-            if len(center_labels) <= 3:
-                label += "\n" + "\n".join(center_labels)
-            ax.annotate(label, xy=(result.f0 / 1e9, center_values[0]),
-                        xytext=(0.48, 0.22 if reflection else 0.58), textcoords="axes fraction",
-                        fontsize=8, color="#17233a", linespacing=1.5,
-                        bbox=dict(boxstyle="round,pad=0.6", fc="#fffdf9", ec="#ff8527", lw=0.8),
-                        arrowprops=dict(arrowstyle="-", color="#ff8527", lw=0.8))
-    is_db = bool(names and names[0] in traces and traces[names[0]].unit == "дБ")
-    ax.set(xlim=(x[0], x[-1]), xlabel="Частота, ГГц",
-           ylabel="Уровень, дБ" if is_db else traces[names[0]].unit)
-    if is_db:
-        if reflection:
-            ax.set_ylim(DB_FLOOR - 5, 0)
-        else:
-            minimum = min(float(np.nanmin(np.maximum(traces[n].values, DB_FLOOR))) for n in names if n in traces)
-            ax.set_ylim(max(DB_FLOOR - 2, min(-20, minimum - 2)), 0)
+        values = np.abs(result.scattering[:, 1, 0])
+        center = abs(result.center_s[1, 0])
+        series = [("S₂₁", _display_db(values), _display_db(center))]
+
+    for index, (label, values, _) in enumerate(series):
+        ax.plot(
+            frequency_ghz, np.where(np.isfinite(values), values, np.nan),
+            label=label, color=SERIES[index % len(SERIES)], lw=1.9,
+            ls=("-", "--", "-.", ":")[index % 4],
+        )
+
+    if frequency_ghz[0] <= center_ghz <= frequency_ghz[-1]:
+        ax.axvline(center_ghz, color="#ff8527", ls="--", lw=0.9, alpha=0.9)
+        name, _, center = series[0]
+        if np.isfinite(center):
+            ax.plot(center_ghz, center, "o", ms=6, mfc="white", mec="#ff7c12",
+                    mew=1.3, clip_on=False, zorder=5)
+            label = f"f₀ = {center_ghz:.3f} ГГц"
+            if len(series) == 1:
+                value = f"≤ {DB_FLOOR}" if is_db and center == DB_FLOOR else f"{center:.3g}"
+                label += f"\n{name} = {value}" + (" дБ" if is_db else "")
+            ax.annotate(
+                label, xy=(center_ghz, center), xytext=(0.48, 0.22 if reflection else 0.58),
+                textcoords="axes fraction", fontsize=8, color="#17233a",
+                bbox=dict(boxstyle="round,pad=0.6", fc="#fffdf9", ec="#ff8527", lw=0.8),
+                arrowprops=dict(arrowstyle="-", color="#ff8527", lw=0.8),
+            )
+
+    ax.set(xlim=(frequency_ghz[0], frequency_ghz[-1]), xlabel="Частота, ГГц")
+    if reflection:
+        ax.set(ylabel="КСВ", ylim=(0.98, max(1.05, ax.get_ylim()[1])))
+    elif is_db:
+        minimum = float(np.min(series[0][1]))
+        ax.set(ylabel="Уровень, дБ", ylim=(max(DB_FLOOR - 2, min(-20, minimum - 2)), 0))
+    else:
+        ax.set(ylabel="|Γ|")
     style_axes(ax)
     ax.xaxis.label.set_fontsize(9)
     ax.yaxis.label.set_fontsize(9)
-    ax.legend(fontsize=8, loc="lower left", frameon=True, facecolor="white",
-              edgecolor="#cbd8e9", framealpha=0.95)
+    ax.legend(fontsize=8, loc="best", ncols=2 if len(series) > 4 else 1,
+              frameon=True, facecolor="white", edgecolor="#cbd8e9", framealpha=0.95)
+
+
+def _display_db(amplitude):
+    return 20 * np.log10(np.maximum(amplitude, 10 ** (DB_FLOOR / 20)))
+
+
+def _vswr(gamma):
+    # Values at and above unity represent complete reflection for these passive models.
+    return np.divide(1 + gamma, 1 - gamma, out=np.full_like(gamma, np.inf), where=gamma < 1)
 
 
 def plot_power(figure: Figure, result: Result) -> None:

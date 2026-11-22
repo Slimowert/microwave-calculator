@@ -40,34 +40,46 @@ def test_desktop_workflow(monkeypatch, tmp_path):
             app.processEvents()
             assert window.result is not None, window.feedback.text()
             assert window.table.rowCount() > 0
-        window.device.setCurrentIndex(window.device.findData("wilkinson_unequal"))
+        assert window.device.findData("wilkinson_unequal") == -1
+        window._open_module("tee")
+        window.fields["ratio"][0].setText("2")
         window.calculate_button.click()
-        for extension in ("JSON", "CSV", "PNG"):
+        assert window.result.kind == "tee"
+        assert abs(window.result.center_s[1, 0]) ** 2 == pytest.approx(1 / 3)
+        assert abs(window.result.center_s[2, 0]) ** 2 == pytest.approx(2 / 3)
+        window.navigation[3][0].click()
+        assert set(window.exports) == {"CSV", "PNG", "HFSS"}
+        for extension in ("CSV", "PNG"):
             target = tmp_path / ("measurement." + extension.lower())
             monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
             window.exports[extension].click()
             assert target.stat().st_size > 0
         assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-        window.navigation[4][0].click()
+        window.navigation[0][0].click()
+        target = tmp_path / "scheme.png"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        window.scheme_export.click()
+        assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        window.navigation[3][0].click()
         target = tmp_path / "design"
         monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
-        hfss = next(button for name, button in window.export_actions if name == "HFSS")
-        hfss.click()
+        window.exports["HFSS"].click()
         assert target.with_suffix(".py").exists()
         assert "design.py" in window.statusBar().currentMessage()
         window.navigation[0][0].click()
         window.fields["f0"][0].setText("-2")
-        assert not window.exports["JSON"].isEnabled()
+        assert not window.exports["CSV"].isEnabled()
         window.calculate_button.click()
         assert window.result is None
         assert "частота" in window.feedback.text().lower()
         window.fields["f0"][0].setText("2.4")
         window.calculate_button.click()
-        unavailable = tmp_path / "missing" / "run.json"
+        unavailable = tmp_path / "missing" / "run.csv"
         monkeypatch.setattr(
             QFileDialog, "getSaveFileName", lambda *args: (str(unavailable), "")
         )
-        window.exports["JSON"].click()
+        window.navigation[3][0].click()
+        window.exports["CSV"].click()
         assert "Не удалось сохранить" in window.feedback.text()
     finally:
         window.close()

@@ -3,6 +3,7 @@
 from math import asinh, pi, sin, sinh, sqrt, tanh
 
 import numpy as np
+from scipy.optimize import least_squares
 
 from .core import (
     IDEAL,
@@ -12,8 +13,10 @@ from .core import (
     Trace,
     frequency_grid,
     microstrip,
+    microstrip_model,
     network_s,
     positive,
+    substrate,
 )
 
 
@@ -21,6 +24,67 @@ def db(values: np.ndarray | complex) -> np.ndarray | float:
     """Convert an amplitude or array of amplitudes to decibels."""
     with np.errstate(divide="ignore"):
         return 20 * np.log10(abs(values))
+
+
+def synthesize_wilkinson(
+    sections: int, z0: float, h: float, er: float, f0: float,
+    start: float, stop: float, count: int,
+) -> Result:
+    """Fit a symmetric multi-section Wilkinson to the requested frequency band."""
+    positive(z0, "Опорное сопротивление")
+    positive(f0, "Центральная частота")
+    substrate(h, er)
+    if not 2 <= sections <= 8:
+        raise InputError("Количество секций: укажите число от 2 до 8.")
+
+    frequency = frequency_grid(start, stop, 129)
+    with np.errstate(over="ignore", invalid="ignore"):
+        phase = (frequency / f0) * (pi / 2)
+    if not np.isfinite(phase).all():
+        raise InputError("Отношение частот выходит за численный диапазон.")
+    cosine, sine = np.cos(phase), 1j * np.sin(phase)
+
+    # Bound line impedances by synthesizable microstrip widths and keep all resistors positive.
+    lower_z = max(microstrip_model(100, er)[0], 0.05 * z0)
+    upper_z = min(microstrip_model(0.01, er)[0], 20 * z0)
+    if lower_z >= upper_z:
+        raise InputError("Опорное сопротивление вне диапазона автоматического подбора.")
+    lower = np.log([lower_z / z0] * sections + [0.05] * sections)
+    upper = np.log([upper_z / z0] * sections + [100] * sections)
+    initial = np.log(np.r_[np.geomspace(1, 2, sections), np.geomspace(2, 10, sections)])
+    initial = np.clip(initial, lower, upper)
+
+    def residual(parameters: np.ndarray) -> np.ndarray:
+        impedances, resistances = np.split(np.exp(parameters), 2)
+        # Looking from each output, the even mode sees 2 Z₀ at the junction.
+        # The odd mode sees a short there and R/2 to ground at each resistor.
+        voltage = np.array([[2.0], [0.0]])
+        current = np.array([[1.0], [1.0]])
+        for impedance, resistance in zip(impedances[::-1], resistances[::-1], strict=True):
+            voltage, current = (
+                cosine * voltage + sine * impedance * current,
+                cosine * current + sine * voltage / impedance,
+            )
+            current[1] += 2 * voltage[1] / resistance
+        reflection = (voltage - current) / (voltage + current)
+        # Symmetry gives S22=(even+odd)/2 and S23=(even-odd)/2.
+        # The lossless even-mode path gives |S11|=|even|.
+        reflection[0] *= sqrt(3)
+        return np.r_[reflection.real.ravel(), reflection.imag.ravel()]
+
+    solution = least_squares(residual, initial, bounds=(lower, upper), max_nfev=200, ftol=1e-7)
+    impedances, resistances = np.split(z0 * np.exp(solution.x), 2)
+    # The two microstrip formulas leave a small impedance gap at W/h = 1.
+    gap_low = microstrip_model(np.nextafter(1.0, 2.0), er)[0]
+    gap_high = microstrip_model(1.0, er)[0]
+    in_gap = (gap_low < impedances) & (impedances < gap_high)
+    impedances[in_gap] = np.where(
+        impedances[in_gap] < (gap_low + gap_high) / 2, gap_low, gap_high
+    )
+    return multi_divider(
+        "wilkinson_sections", z0, h, er, f0, start, stop, count,
+        impedances=tuple(impedances), resistances=tuple(resistances),
+    )
 
 
 def multi_divider(
