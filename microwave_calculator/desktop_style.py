@@ -12,6 +12,7 @@ STYLE = """
 QMainWindow, QWidget#workspace, QWidget#pages { background: #f5f8fd; color: #10182f; }
 QWidget { font-size: 14px; color: #10182f; }
 QWidget#sidebar { border-right: 1px solid #dce4f0; }
+QWidget#parameterFields { background: white; }
 QLabel { background: transparent; }
 QLabel#brandTitle { font-size: 14px; font-weight: 700; }
 QLabel#brandSubtitle { color: #596982; font-size: 11px; }
@@ -53,6 +54,12 @@ QLineEdit, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #d2ddec;
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #96b5e0; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #1763e8; background: #fcfdff; }
 QLineEdit:disabled, QComboBox:disabled { background: #f1f4f9; color: #a0adc0; }
+QSpinBox { padding-right: 24px; }
+QSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right;
+    width: 22px; height: 15px; background: #f2f6fc; border: 0; border-top-right-radius: 5px; }
+QSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 22px; height: 15px; background: #f2f6fc; border: 0; border-bottom-right-radius: 5px; }
+QSpinBox::up-arrow, QSpinBox::down-arrow { image: none; }
 QComboBox { padding-right: 24px; }
 QComboBox::drop-down { width: 23px; border: none; background: transparent; }
 QComboBox::down-arrow { image: none; }

@@ -16,6 +16,7 @@ from .core import (
     microstrip_model,
     network_s,
     positive,
+    s_name,
     substrate,
 )
 
@@ -135,8 +136,8 @@ def multi_divider(
         summary = {"Секций в плече": number}
         model = IDEAL + "\nСекция 1 ближайшая к выходам; все участки λ/4 на f₀.\n" + MICRO
     elif kind == "wilkinson_n":
-        if not isinstance(outputs, int) or not 2 <= outputs <= 8:
-            raise InputError("Число выходов: введите целое число от 2 до 8.")
+        if not isinstance(outputs, int) or not 2 <= outputs <= 10:
+            raise InputError("Число выходов: введите целое число от 2 до 10.")
         impedance = z0 * sqrt(outputs)
         line = microstrip(h, er, f0, impedance=impedance).summary
         lines = [(0, port, impedance) for port in range(1, outputs + 1)]
@@ -157,9 +158,9 @@ def multi_divider(
     s, center = full[:-1], full[-1]
     output_ports = range(1, outputs + 1)
     traces = [
-        Trace(f"S{i + 1}{i + 1}", "дБ", db(s[:, i, i])) for i in range(outputs + 1)
+        Trace(s_name(i + 1, i + 1), "дБ", db(s[:, i, i])) for i in range(outputs + 1)
     ]
-    traces += [Trace(f"S{i + 1}1", "дБ", db(s[:, i, 0])) for i in output_ports]
+    traces += [Trace(s_name(i + 1, 1), "дБ", db(s[:, i, 0])) for i in output_ports]
     traces.append(Trace("S23", "дБ", db(s[:, 1, 2])))
     for port in output_ports:
         summary[f"Доля мощности на порту {port + 1}"] = abs(center[port, 0]) ** 2

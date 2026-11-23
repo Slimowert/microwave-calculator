@@ -27,7 +27,7 @@ class Result:
     """Store calculation inputs, design values, and optional sweep data."""
 
     kind: str
-    inputs: dict[str, float | np.integer | None]
+    inputs: dict[str, float | np.integer | None | list[float]]
     summary: dict[str, float]
     model: str
     f0: float
@@ -36,6 +36,7 @@ class Result:
     scattering: np.ndarray | None = None
     center_s: np.ndarray | None = None
     sections: dict[str, dict[str, float]] = field(default_factory=dict)
+    topology: dict[str, object] = field(default_factory=dict)
 
 
 MICRO = (
@@ -233,6 +234,7 @@ def network_s(
     *,
     ports: int = 3,
     resistors: Sequence[tuple[int, int, float]] = (),
+    shunts: Sequence[tuple[int, float]] = (),
 ) -> np.ndarray:
     """Solve node voltages and line-end currents using chain equations.
 
@@ -240,7 +242,8 @@ def network_s(
     Keeping both line currents avoids singular cotangents at half wavelengths.
     """
     resistors = (*resistors, resistor) if resistor is not None else resistors
-    nodes = 1 + max(max(a, b) for a, b, _ in (*lines, *resistors))
+    nodes = 1 + max(ports - 1, *(max(a, b) for a, b, _ in (*lines, *resistors)),
+                    *(node for node, _ in shunts))
     size = nodes + 2 * len(lines)
     matrix = np.zeros((len(frequency), size, size), dtype=complex)
     rhs = np.zeros((len(frequency), size, ports), dtype=complex)
@@ -266,7 +269,14 @@ def network_s(
         for row, other in ((a, b), (b, a)):
             matrix[:, row, row] += conductance
             matrix[:, row, other] -= conductance
+    for node, resistance in shunts:
+        matrix[:, node, node] += z0 / resistance
     return np.linalg.solve(matrix, rhs)[:, :ports, :] - np.eye(ports)
+
+
+def s_name(row: int, column: int) -> str:
+    """Keep legacy names and disambiguate port indices 10 and 11."""
+    return f"S{row}{column}" if max(row, column) < 10 else f"S[{row},{column}]"
 
 
 def _divider_topology(

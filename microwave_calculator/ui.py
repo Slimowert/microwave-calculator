@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionButton,
     QStyleOptionComboBox,
+    QStyleOptionSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -35,16 +37,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .core import InputError, Result, divider, microstrip, transformer
+from .core import InputError, Result, microstrip, transformer
+from .distribution import distributed_divider, power_fractions
 from .desktop_style import STYLE, Sidebar, card, icon
 from .export import write_csv
-from .extended import lowpass, multi_divider, synthesize_wilkinson
-from .hfss import HFSS_KINDS, write_hfss
+from .extended import lowpass
+from .hfss import supports_hfss, write_hfss
 from .plots import (
     plot_dashboard_trace,
     plot_power,
     plot_response,
     plot_schematic,
+    plot_distribution_preview,
 )
 
 
@@ -69,7 +73,6 @@ FIELDS = {
     "z0": ("Сопротивление Z₀", "50", ("Ом",)),
     "load": ("Нагрузка R", "100", ("Ом",)),
     "effective": ("Эффективная проницаемость εэфф", "2,7", ("1",)),
-    "ratio": ("Отношение r = P₃/P₂", "1", ("1",)),
     "start": ("Начальная частота fmin", "1,2", FREQUENCY),
     "stop": ("Конечная частота fmax", "3,6", FREQUENCY),
     "count": ("Число точек N", "1001", ("1",)),
@@ -78,6 +81,7 @@ FIELDS = {
 }
 INTEGERS = {"count", "outputs", "order"}
 FILTERS = {"butterworth", "chebyshev"}
+DIVIDERS = {"tee", "wilkinson_equal", "resistive"}
 
 
 class PlotCanvas(FigureCanvasQTAgg):
@@ -131,6 +135,22 @@ class UnitComboBox(QComboBox):
         x, y = self.width() - 13, self.height() / 2
         painter.drawLine(QPointF(x - 3.5, y - 1.5), QPointF(x, y + 2))
         painter.drawLine(QPointF(x, y + 2), QPointF(x + 3.5, y - 1.5))
+
+
+class CounterSpinBox(QSpinBox):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#526d89"), 1.4))
+        for control, direction in ((QStyle.SubControl.SC_SpinBoxUp, -1),
+                                   (QStyle.SubControl.SC_SpinBoxDown, 1)):
+            rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option, control, self)
+            x, y = rect.center().x(), rect.center().y()
+            painter.drawLine(QPointF(x - 3, y - direction), QPointF(x, y + direction * 2))
+            painter.drawLine(QPointF(x, y + direction * 2), QPointF(x + 3, y - direction))
 
 
 class CalculatorWindow(QMainWindow):
@@ -320,14 +340,37 @@ class CalculatorWindow(QMainWindow):
 
     def _build_parameters(self) -> QWidget:
         content = QWidget()
+        content.setObjectName("parameterFields")
         fields_layout = QVBoxLayout(content)
+        fields_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         fields_layout.setContentsMargins(2, 2, 2, 2)
-        fields_layout.setSpacing(8)
+        fields_layout.setSpacing(6)
         self.form = QFormLayout()
-        self.form.setVerticalSpacing(10)
+        self.form.setVerticalSpacing(6)
         self.form.setHorizontalSpacing(12)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         fields_layout.addLayout(self.form)
+        self.power_box = QWidget()
+        power_layout = QVBoxLayout(self.power_box)
+        power_layout.setContentsMargins(0, 0, 0, 0)
+        power_layout.setSpacing(6)
+        power_header = QHBoxLayout()
+        power_title = QLabel("Мощность по выходам, %")
+        power_title.setObjectName("muted")
+        power_header.addWidget(power_title, 1)
+        self.equal_power_button = QPushButton("Поровну")
+        self.equal_power_button.setObjectName("textButton")
+        self.equal_power_button.clicked.connect(self._set_equal_power)
+        power_header.addWidget(self.equal_power_button)
+        power_layout.addLayout(power_header)
+        self.power_grid = QGridLayout()
+        self.power_grid.setSpacing(6)
+        power_layout.addLayout(self.power_grid)
+        self.power_total = QLabel()
+        self.power_total.setObjectName("muted")
+        power_layout.addWidget(self.power_total)
+        self.power_entries = []
+        fields_layout.addWidget(self.power_box)
         self.device = UnitComboBox()
         self.device.setAccessibleName("Тип устройства")
         for key, label in DEVICES.items():
@@ -361,7 +404,11 @@ class CalculatorWindow(QMainWindow):
         self.feedback.setWordWrap(True)
         fields_layout.addStretch()
         fields_layout.addWidget(self.feedback)
-        return card("Параметры", content, "settings")
+        self.parameter_scroll = QScrollArea()
+        self.parameter_scroll.setWidgetResizable(True)
+        self.parameter_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.parameter_scroll.setWidget(content)
+        return card("Параметры", self.parameter_scroll, "settings")
 
     def _build_result_pages(self) -> None:
         self.table = QTableWidget(0, 2)
@@ -384,7 +431,7 @@ class CalculatorWindow(QMainWindow):
         for extension, title, description in (
             ("CSV", "Частотные характеристики", "Все точки частотной сетки для анализа в Excel, Python и других приложениях."),
             ("PNG", "Графики и схемы", "Частотные графики или мини-схема для расчёта без частотной сетки."),
-            ("HFSS", "3D-модель для Ansys HFSS", "Скрипт .py для линии, Т-делителя или двухвыходного Wilkinson. "
+            ("HFSS", "3D-модель для Ansys HFSS", "Скрипт .py для линии или делителя с двумя выходами: Т-делителя либо односекционного Уилкинсона. "
              "В Electronics Desktop: Tools → Run Script. Затем Analyze All для построения графиков."),
         ):
             row = QWidget()
@@ -411,10 +458,13 @@ class CalculatorWindow(QMainWindow):
             "или <b>Ctrl+Enter</b>. Числа можно вводить с точкой или запятой.</p>"
             "<h3>Параметры и единицы</h3>"
             "<p>Z₀ — опорное сопротивление портов, f₀ — рабочая частота, "
-            "r = P₃/P₂ — отношение выходных мощностей. Параметры подложки и число "
+            "число выходов — от 2 до 10. Задайте процент для каждого выходного порта; "
+            "сумма должна быть 100%. Кнопка «Поровну» заполняет равные доли. "
+            "Проценты относятся к сумме выходных мощностей; потери резистивного делителя "
+            "учитываются отдельно. Параметры подложки и число "
             "точек частотной сетки доступны в раскрывающемся блоке.</p>"
             "<h3>Результаты</h3>"
-            "<p>На графиках показаны передача S₂₁ в дБ и КСВ по портам. "
+            "<p>На графиках показаны передача на каждый выход в дБ и КСВ по портам. "
             "Пунктир отмечает f₀. Для трансформатора с заданной нагрузкой "
             "показаны отражение и КСВ на входе.</p>"
             "<h3>Модель</h3>"
@@ -497,7 +547,7 @@ class CalculatorWindow(QMainWindow):
 
     def _set_feedback(self, message: str, state: str = "") -> None:
         self.feedback.setText(message)
-        if self.tabs.currentIndex() != 0:
+        if state == "error" or self.tabs.currentIndex() != 0:
             self.statusBar().showMessage(message)
         elif self.statusBar().currentMessage():
             self.statusBar().clearMessage()
@@ -581,11 +631,25 @@ class CalculatorWindow(QMainWindow):
         device_label.ensurePolished()
         device_label.setMinimumWidth(device_label.sizeHint().width())
         self.form.addRow(device_label, self.device)
-        if kind == "wilkinson_equal":
-            self.section_count = QSpinBox()
-            self.section_count.setRange(1, 8)
-            self.section_count.setAccessibleName("Количество секций в плече")
-            self.form.addRow("Секций в плече", self.section_count)
+        self.output_count = None
+        if kind in DIVIDERS:
+            self.output_count = CounterSpinBox()
+            self.output_count.setRange(2, 10)
+            self.output_count.setKeyboardTracking(False)
+            self.output_count.setAccessibleName("Количество выходных портов")
+            self.output_count.setToolTip("От 2 до 10 выходов. Порт 1 — вход. При смене числа выходов доли заполняются поровну.")
+            counters = QWidget()
+            counter_layout = QHBoxLayout(counters)
+            counter_layout.setContentsMargins(0, 0, 0, 0)
+            counter_layout.addWidget(self.output_count, 1)
+            if kind == "wilkinson_equal":
+                self.section_count = CounterSpinBox()
+                self.section_count.setRange(1, 8)
+                self.section_count.setAccessibleName("Количество секций в плече")
+                counter_layout.addWidget(QLabel("Секций"))
+                counter_layout.addWidget(self.section_count, 1)
+            self.form.addRow("Выходных портов", counters)
+            self.output_count.valueChanged.connect(self._rebuild_power_fields)
         if kind.startswith("microstrip"):
             keys = ["f0", "h", "er", "width" if kind.endswith("analysis") else "z0"]
         elif kind == "transformer":
@@ -599,14 +663,12 @@ class CalculatorWindow(QMainWindow):
             keys = ["z0", "f0", "start", "stop", "count"]
         else:
             keys = ["z0", "f0", "h", "er"]
-            if kind == "tee":
-                keys.append("ratio")
             keys.extend(("start", "stop", "count"))
         self.fields = {}
         for key in keys:
             label, default, units = FIELDS[key]
             label = {
-                "z0": "Z₀, Ом", "f0": "Частота f₀", "ratio": "Деление P₃/P₂",
+                "z0": "Z₀, Ом", "f0": "Частота f₀",
                 "outputs": "Выходы N", "h": "Подложка h", "er": "Проницаемость εr",
                 "width": "Ширина W", "load": "Нагрузка R", "effective": "ε эффективная",
                 "order": "Порядок n", "ripple": "Пульсации Aₚ", "count": "Точек N",
@@ -654,9 +716,9 @@ class CalculatorWindow(QMainWindow):
         self.advanced_container.setVisible(self.advanced_button.isChecked() and self.advanced_form.rowCount() > 0)
         self.device.setToolTip(DEVICES[kind])
         descriptions = {
-            "wilkinson_equal": "Калькулятор подбирает Z и R автоматически. Номиналы доступны в разделе «Подробности».",
-            "tee": "Задайте отношение мощностей P₃/P₂. Значение 1 даёт равное деление.",
-            "resistive": "Широкополосный резистивный делитель на два выхода.",
+            "wilkinson_equal": "Задайте доли мощности на f₀. Сумма — 100%. Z и R рассчитываются автоматически.",
+            "tee": "Задайте доли мощности на f₀. Сумма — 100%. Выходы Т-соединения не развязаны.",
+            "resistive": "Проценты — доли суммарной выходной мощности. Потери в резисторах показаны отдельно.",
             "transformer": "Согласование нагрузки участком линии длиной λ/4.",
             "butterworth": "Максимально плоская характеристика в полосе пропускания.",
             "chebyshev": "Заданная пульсация и крутой спад за полосой пропускания.",
@@ -664,9 +726,68 @@ class CalculatorWindow(QMainWindow):
         self.device_description.setText(descriptions.get(kind, "Анализ и синтез геометрии микрополосковой линии."))
         if kind == "wilkinson_equal":
             self.section_count.valueChanged.connect(self.invalidate)
+        self.power_box.setVisible(kind in DIVIDERS)
+        if kind in DIVIDERS:
+            self._rebuild_power_fields(2)
         self.invalidate(refresh_plots=True)
+        self._render_divider_preview()
 
-    def read_fields(self) -> dict[str, int | float]:
+    def _rebuild_power_fields(self, outputs: int) -> None:
+        while self.power_grid.count():
+            widget = self.power_grid.takeAt(0).widget()
+            widget.hide()
+            widget.deleteLater()
+        self.power_entries = []
+        for index in range(outputs):
+            cell = QWidget()
+            layout = QHBoxLayout(cell)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            layout.addWidget(QLabel(f"Порт {index + 2}"))
+            entry = QLineEdit()
+            entry.setAccessibleName(f"Мощность на порту {index + 2}, проценты")
+            entry.setAlignment(Qt.AlignmentFlag.AlignRight)
+            entry.textChanged.connect(self._power_changed)
+            layout.addWidget(entry, 1)
+            layout.addWidget(QLabel("%"))
+            self.power_grid.addWidget(cell, index // 2, index % 2)
+            self.power_entries.append(entry)
+        self._set_equal_power()
+
+    def _set_equal_power(self) -> None:
+        outputs = len(self.power_entries)
+        if not outputs:
+            return
+        for entry in self.power_entries:
+            entry.blockSignals(True)
+            entry.setText(f"{100 / outputs:.8f}".rstrip("0").rstrip(".").replace(".", ","))
+            entry.blockSignals(False)
+        self._power_changed()
+
+    def _power_changed(self) -> None:
+        try:
+            values = [float(entry.text().strip().replace(",", ".")) for entry in self.power_entries]
+            valid = all(np.isfinite(value) and 0 < value < 100 for value in values)
+            total = sum(values)
+            complete = valid and abs(total - 100) <= 1e-6
+            text = f"Сумма: {total:.8g}%" if np.isfinite(total) else "Сумма: —"
+            if not complete:
+                text += " · требуется 100%"
+        except ValueError:
+            text, complete = "Введите проценты для всех выходов · сумма 100%", False
+        self.power_total.setText(text)
+        self.power_total.setStyleSheet("color: #087d68;" if complete else "color: #ad4800;")
+        self.invalidate()
+        self._render_divider_preview()
+
+    def _render_divider_preview(self) -> None:
+        if self.device.currentData() in DIVIDERS and self.output_count is not None:
+            count = self.output_count.value()
+            self.mini_scheme.setMinimumHeight(max(200, count * 23 + 45))
+            plot_distribution_preview(self.mini_scheme.figure, self.device.currentData(), count)
+            self.mini_scheme.draw_idle()
+
+    def read_fields(self) -> dict:
         data = {}
         for key, (entry, unit) in self.fields.items():
             raw = entry.text().strip().replace(",", ".")
@@ -688,6 +809,19 @@ class CalculatorWindow(QMainWindow):
                 raise InputError(
                     f"{FIELDS[key][0]}: введите {'целое число' if key in INTEGERS else 'число'}."
                 ) from error
+        if self.device.currentData() in DIVIDERS:
+            percentages = []
+            for port, entry in enumerate(self.power_entries, 2):
+                try:
+                    percentages.append(float(entry.text().strip().replace(",", ".")))
+                except ValueError as error:
+                    self.tabs.setCurrentIndex(0)
+                    entry.setFocus()
+                    entry.selectAll()
+                    raise InputError(f"Порт {port}: введите процент мощности.") from error
+            power_fractions(self.output_count.value(), percentages)
+            data["outputs"] = self.output_count.value()
+            data["power_percentages"] = percentages
         return data
 
     @Slot()
@@ -697,9 +831,13 @@ class CalculatorWindow(QMainWindow):
         try:
             p = self.read_fields()
             kind = self.device.currentData()
-            if kind == "wilkinson_equal" and self.section_count.value() > 1:
-                kind = "wilkinson_sections"
-            if kind == "microstrip_analysis":
+            if kind in DIVIDERS:
+                result = distributed_divider(
+                    kind, p["z0"], p.get("h"), p.get("er"), p["f0"],
+                    p["start"], p["stop"], p["count"], p["outputs"], p["power_percentages"],
+                    stages=self.section_count.value() if kind == "wilkinson_equal" else 1,
+                )
+            elif kind == "microstrip_analysis":
                 result = microstrip(p["h"], p["er"], p["f0"], width=p["width"])
             elif kind == "microstrip_synthesis":
                 result = microstrip(p["h"], p["er"], p["f0"], impedance=p["z0"])
@@ -724,41 +862,13 @@ class CalculatorWindow(QMainWindow):
                     p["stop"],
                     p["count"],
                 )
-            elif kind == "wilkinson_sections":
-                result = synthesize_wilkinson(
-                    self.section_count.value(), p["z0"], p["h"], p["er"],
-                    p["f0"], p["start"], p["stop"], p["count"],
-                )
-            elif kind == "resistive":
-                result = multi_divider(
-                    kind,
-                    p["z0"],
-                    p.get("h"),
-                    p.get("er"),
-                    p["f0"],
-                    p["start"],
-                    p["stop"],
-                    p["count"],
-                )
-            else:
-                result = divider(
-                    kind,
-                    p["z0"],
-                    p.get("ratio", 1),
-                    p["h"],
-                    p["er"],
-                    p["f0"],
-                    p["start"],
-                    p["stop"],
-                    p["count"],
-                )
             self.show_result(result)
             self.result = result
             self._update_view_options()
             self._set_feedback("Расчёт выполнен · f₀ = " + f"{result.f0 / 1e9:.3f} ГГц", "success")
             for extension, button in self.export_actions:
                 available = (extension != "CSV" or result.frequency is not None) and (
-                    extension != "HFSS" or result.kind in HFSS_KINDS
+                    extension != "HFSS" or supports_hfss(result)
                 )
                 button.setEnabled(available)
                 if extension == "HFSS":
@@ -789,7 +899,7 @@ class CalculatorWindow(QMainWindow):
 
     def _render_frequency_plots(self, result: Result | None) -> None:
         transformer = self.device.currentData() == "transformer"
-        self.preview_card.title.setText("Отражение |Γ| по частоте" if transformer else "S₂₁ по частоте")
+        self.preview_card.title.setText("Отражение |Γ| по частоте" if transformer else "Передача на выходы")
         self.reflection_card.title.setText("КСВ на входе" if transformer else "КСВ по портам")
         plot_dashboard_trace(self.preview.figure, result, transformer=transformer)
         plot_dashboard_trace(self.reflection.figure, result, reflection=True, transformer=transformer)
@@ -821,6 +931,8 @@ class CalculatorWindow(QMainWindow):
             if "capacitance_f" in section:
                 rows.append((f"{name}, пФ", section["capacitance_f"] * 1e12))
                 continue
+            if "z_ohm" not in section:
+                continue
             rows.extend(
                 (
                     (f"{name} · Z, Ом", section["z_ohm"]),
@@ -846,29 +958,29 @@ class CalculatorWindow(QMainWindow):
         metrics = []
         is_divider = result.center_s is not None and result.center_s.shape[0] >= 3
         if is_divider:
-            sections = list(result.sections.values())
-            if result.kind == "wilkinson_sections":
-                metrics.append(("Секций", str(len(sections))))
-            elif sections and "z_ohm" in sections[0]:
-                impedances = list(dict.fromkeys(section["z_ohm"] for section in sections[:2]))
-                metrics.append(("Z₂ / Z₃" if len(impedances) > 1 else "Z ветви", " / ".join(f"{z:.2f}" for z in impedances) + " Ω"))
-            resistor = result.summary.get("Развязывающий резистор, Ом", result.summary.get("Каждый резистор звезды, Ом"))
-            if resistor is not None:
-                metrics.append(("R", f"{resistor:.4g} Ω"))
             outputs = result.center_s.shape[0] - 1
+            metrics.append(("Выходных портов", str(outputs)))
+            power = abs(result.center_s[:, 0]) ** 2
             if outputs == 2:
-                for port in (1, 2):
-                    metrics.append((("P₂", "P₃")[port - 1], f"{abs(result.center_s[port, 0]) ** 2:.0%}"))
+                metrics.extend((f"P{port + 1} от входа", f"{power[port]:.2%}") for port in (1, 2))
             else:
-                metrics.append(("Выходы N", str(outputs)))
-                metrics.append(("На каждый выход", f"{abs(result.center_s[1, 0]) ** 2:.1%}"))
-            for label, amplitude in (("Return Loss", abs(result.center_s[0, 0])), ("Isolation", abs(result.center_s[1, 2]))):
-                metrics.append((label, "≥ 100 дБ" if amplitude < 1e-5 else f"{-20 * np.log10(amplitude):.2f} дБ"))
+                metrics.append(("На выходах", f"{sum(power[1:]):.2%}"))
+            if result.kind == "resistive":
+                metrics.append(("Потери", f"{max(0, 1 - sum(power)):.2%}"))
+            else:
+                amplitude = abs(result.center_s[0, 0])
+                metrics.append(("Return Loss", "≥ 100 дБ" if amplitude < 1e-5 else f"{-20 * np.log10(amplitude):.2f} дБ"))
+                coupling = np.abs(result.center_s[1:, 1:]).copy()
+                np.fill_diagonal(coupling, 0)
+                amplitude = np.max(coupling)
+                metrics.append(("Развязка, худшая", "≥ 100 дБ" if amplitude < 1e-5 else f"{-20 * np.log10(amplitude):.2f} дБ"))
+            if result.kind == "wilkinson_sections":
+                metrics.append(("Секций в плече", str(result.inputs.get("stages", len(result.sections)))))
         else:
             for name, value in result.summary.items():
                 label, separator, unit = name.rpartition(", ")
                 metrics.append((label if separator else name, f"{value:.4g} {unit}".rstrip()))
-        self.set_metrics(metrics[:8])
+        self.set_metrics(metrics)
 
     def save(self, extension: str, *, schematic: bool = False) -> None:
         if self.result is None:

@@ -41,7 +41,7 @@ def test_dashboard_navigation_display_controls_and_resizing(monkeypatch):
         assert window.tabs.count() == 6
         assert window.scheme_card.title.text() == "Мини-схема"
         assert window.mini_scheme.figure.axes
-        assert window.preview_card.title.text() == "S₂₁ по частоте"
+        assert window.preview_card.title.text() == "Передача на выходы"
         assert window.reflection_card.title.text() == "КСВ по портам"
         window.show_sweep.click()
         assert window.preview_card.isHidden()

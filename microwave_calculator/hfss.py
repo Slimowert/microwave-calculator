@@ -9,12 +9,16 @@ from .core import Result, synthesize_width
 HFSS_KINDS = {"microstrip", "tee", "wilkinson_equal", "wilkinson_unequal"}
 
 
+def supports_hfss(result: Result) -> bool:
+    return result.kind in HFSS_KINDS and result.inputs.get("outputs", 2) == 2
+
+
 def _quantity(value: float, unit: str) -> str:
     return f"{value:.15g}{unit}"
 
 
 def hfss_script(result: Result) -> str:
-    if result.kind not in HFSS_KINDS:
+    if not supports_hfss(result):
         raise ValueError("Для этого режима пока нет физической разводки HFSS.")
     inputs = result.inputs
     height, er = inputs["h_m"], inputs["er"]

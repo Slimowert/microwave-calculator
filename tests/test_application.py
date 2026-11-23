@@ -42,11 +42,13 @@ def test_desktop_workflow(monkeypatch, tmp_path):
             assert window.table.rowCount() > 0
         assert window.device.findData("wilkinson_unequal") == -1
         window._open_module("tee")
-        window.fields["ratio"][0].setText("2")
+        assert "ratio" not in window.fields
+        window.power_entries[0].setText("25")
+        window.power_entries[1].setText("75")
         window.calculate_button.click()
         assert window.result.kind == "tee"
-        assert abs(window.result.center_s[1, 0]) ** 2 == pytest.approx(1 / 3)
-        assert abs(window.result.center_s[2, 0]) ** 2 == pytest.approx(2 / 3)
+        assert abs(window.result.center_s[1, 0]) ** 2 == pytest.approx(.25)
+        assert abs(window.result.center_s[2, 0]) ** 2 == pytest.approx(.75)
         window.navigation[3][0].click()
         assert set(window.exports) == {"CSV", "PNG", "HFSS"}
         for extension in ("CSV", "PNG"):

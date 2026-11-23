@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .core import s_name
+
 
 if TYPE_CHECKING:
     from .core import Result
@@ -58,6 +60,7 @@ def write_json(
         "summary_f0": result.summary,
         "s_at_f0": result.center_s,
         "s_unit": "1",
+        "topology": result.topology,
     }
     with open(path, "w", encoding="utf-8") as file:
         json.dump(json_value(data), file, ensure_ascii=False, allow_nan=False, indent=2)
@@ -86,7 +89,7 @@ def write_csv(
     if result.scattering is not None:
         for i in range(result.scattering.shape[1]):
             for j in range(result.scattering.shape[2]):
-                name = f"S{i + 1}{j + 1}"
+                name = s_name(i + 1, j + 1)
                 headers.extend((f"Re({name}), 1", f"Im({name}), 1"))
                 values = result.scattering[:, i, j]
                 columns.extend((values.real, values.imag))

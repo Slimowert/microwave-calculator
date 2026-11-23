@@ -9,10 +9,11 @@ from matplotlib.image import imread
 from matplotlib.patches import Rectangle
 
 
-from .core import Result
+from .core import Result, s_name
 
 DB_FLOOR = -100
-SERIES = ("#0752d9", "#00c7df", "#7357bb", "#e88832", "#556e9a")
+SERIES = ("#0752d9", "#00b9c9", "#8755c8", "#e88832", "#288f57",
+          "#d64f84", "#716638", "#339dcc", "#b45137", "#6873a0", "#657482")
 
 BOOK_FIGURES = {
     "microstrip": ("microstrip", "3.25(a)", 147),
@@ -98,6 +99,9 @@ def plot_schematic(figure: Figure, result: Result, *, compact: bool = False) -> 
     figure.clear()
     ax = figure.subplots()
     ax.axis("off")
+    if result.topology:
+        _plot_distribution_schematic(ax, result, compact=compact)
+        return
     if result.kind in ("butterworth", "chebyshev"):
         _plot_filter_schematic(ax, result)
         return
@@ -150,6 +154,128 @@ def _plot_filter_schematic(ax: Axes, result: Result) -> None:
             )
             ax.text(x, 0.35, name, ha="right")
     ax.set(xlim=(-0.05, 1.05), ylim=(0, 1))
+
+
+def plot_distribution_preview(figure: Figure, kind: str, outputs: int) -> None:
+    """Redraw all selected ports while a new calculation is pending."""
+    branches = []
+    for port in range(2, outputs + 2):
+        branches.append({"port": port, "lines": [f"Z{port}"],
+                         "isolation": [f"R{port}"] if kind == "wilkinson_equal" else [],
+                         "resistors": [f"R{port}"], "pads": []})
+    result = Result(kind, {}, {}, "", 0, topology={
+        "kind": kind, "outputs": outputs, "stages": 1, "branches": branches,
+        "components": {}, "input_resistor": "R входа",
+    })
+    figure.clear()
+    ax = figure.subplots()
+    ax.axis("off")
+    _plot_distribution_schematic(ax, result, compact=True)
+
+
+def _plot_distribution_schematic(ax: Axes, result: Result, *, compact: bool) -> None:
+    """Draw actual branches and isolation stars using explicit common net labels."""
+    topology = result.topology
+    n = topology["outputs"]
+    stages = topology["stages"]
+    kind = topology["kind"]
+    components = topology["components"]
+    color = "#26354c"
+    font = (7 if n <= 5 else 6) if compact else 9
+    if stages > 3:
+        font -= .8
+    center = (n - 1) / 2
+    line_end = .14 + .59 * stages
+    output_x = line_end + .27
+
+    def wire(xs, ys):
+        ax.plot(xs, ys, color=color, lw=1.0)
+
+    def element(x1, x2, y, label):
+        wire([x1, x2], [y, y])
+        mid = (x1 + x2) / 2
+        width = (x2 - x1) * .65
+        ax.add_patch(Rectangle((mid - width / 2, y - .075), width, .15,
+                               facecolor="white", edgecolor=color, lw=1, zorder=3))
+        ax.text(mid, y + .16, label, fontsize=font, ha="center", va="bottom")
+
+    def nominal(name, key, symbol):
+        value = components.get(name, {}).get(key)
+        return f"{value:.3g} Ω" if value is not None else symbol
+
+    wire([-.04, .14], [center, center])
+    ax.plot(-.04, center, "o", mfc="white", mec=color, ms=4)
+    ax.text(-.07, center + .2, "P₁", ha="center", fontsize=font + 1)
+    wire([.14, .14], [0, n - 1])
+    if kind == "resistive":
+        element(-.025, .13, center,
+                nominal(topology["input_resistor"], "r_ohm", "R₁"))
+
+    for index, branch in enumerate(topology["branches"]):
+        port, y = branch["port"], n - 1 - index
+        if kind == "resistive":
+            element(.14, .4, y, nominal(branch["resistors"][0], "r_ohm", f"R{port}"))
+            wire([.4, 1.0], [y, y])
+            if branch["pads"]:
+                first, second, ground = branch["pads"]
+                element(.43, .66, y, nominal(first, "r_ohm", first))
+                element(.70, .93, y, nominal(second, "r_ohm", second))
+                wire([.68, .68], [y, y - .37])
+                ax.add_patch(Rectangle((.665, y - .29), .03, .16,
+                                       facecolor="white", edgecolor=color, zorder=3))
+                ax.text(.71, y - .23, nominal(ground, "r_ohm", ground), fontsize=font - .5, va="center")
+                for offset, width in ((.38, .07), (.42, .045), (.46, .02)):
+                    wire([.68 - width / 2, .68 + width / 2], [y - offset] * 2)
+        else:
+            names = list(reversed(branch["lines"]))
+            boundaries = np.linspace(.14, line_end, len(names) + 1)
+            for i, name in enumerate(names):
+                stage = stages - i
+                label = nominal(name, "z_ohm", f"Z{port}") if stages == 1 else f"Z{port}.{stage}"
+                element(boundaries[i], boundaries[i + 1], y, label)
+                if kind == "wilkinson_equal":
+                    # Matching labels below and in the resistor panel denote
+                    # one electrical node; wires do not cross output ports.
+                    ax.plot(boundaries[i + 1], y, ".", color=color, ms=3)
+                    ax.text(boundaries[i + 1], y - .16, f"u{port}.{stage}", fontsize=font - 1,
+                            ha="center", va="top")
+            wire([line_end, output_x], [y, y])
+            if branch.get("transformer"):
+                name = branch["transformer"]
+                element(line_end + .06, output_x - .04, y,
+                        nominal(name, "z_ohm", "Zт") if stages == 1 else f"T{port}")
+        ax.plot(output_x, y, "o", mfc="white", mec=color, ms=4)
+        percentages = result.inputs.get("power_percentages")
+        label = f"P{port}" + (f" · {percentages[index]:.4g}%" if percentages else "")
+        ax.text(output_x + .035, y, label, fontsize=font, va="center")
+
+    right = output_x + .28
+    if kind == "wilkinson_equal":
+        for stage in range(stages):
+            left = output_x + (.57 if stages == 1 else .9) + stage * (.38 if stages == 1 else .55)
+            common = left + .25
+            wire([common, common], [0, n - 1])
+            for index, branch in enumerate(topology["branches"]):
+                y, port = n - 1 - index, branch["port"]
+                name = branch["isolation"][stage]
+                element(left, common, y, nominal(name, "r_ohm", name) if stages == 1 else name)
+                ax.text(left - .01, y - .18, f"u{port}.{stage + 1}", fontsize=font - 1,
+                        ha="left", va="top")
+                ax.plot(common, y, ".", color=color, ms=3)
+            heading = f"Звезда {stage + 1}" if stages == 1 else f"Зв. {stage + 1}"
+            ax.text((left + common) / 2, n - .2, heading, fontsize=font, ha="center")
+            right = common + .12
+        note = "λ/4 на f₀ · u: одноимённые соединённые узлы · звёзды плавающие"
+        if stages > 1:
+            note += "\nZ — линии, T — выходные трансформаторы. Номиналы — в разделе «Подробности»."
+    elif kind == "tee":
+        note = "Все участки λ/4 на f₀ · выходы без развязки"
+    else:
+        note = "Резистивная звезда; Т-аттенюаторы на выходах с меньшей долей мощности"
+    if not result.f0:
+        note = "Предварительная топология · нажмите «Рассчитать»"
+    ax.text(.0, -.65, note, fontsize=font, color="#52657f", va="top")
+    ax.set(xlim=(-.14, right), ylim=(-1.15 if stages > 1 else -.95, n + .15))
 
 
 def _plot_multi_divider_schematic(ax: Axes, result: Result) -> None:
@@ -320,7 +446,7 @@ def plot_response(figure: Figure, result: Result | None, *, transformer: bool = 
     transmission, vswr = figure.subplots(1, 2)
     _plot_dashboard_trace(transmission, result, reflection=False, transformer=transformer)
     _plot_dashboard_trace(vswr, result, reflection=True, transformer=transformer)
-    transmission.set_title("Отражение |Γ|" if transformer else "S₂₁ по частоте")
+    transmission.set_title("Отражение |Γ|" if transformer else "Передача на выходы")
     vswr.set_title("КСВ на входе" if transformer else "КСВ по портам")
 
 
@@ -337,7 +463,7 @@ def plot_overview(figure: Figure, result: Result) -> None:
         (
             ax1,
             "Передача на выходы",
-            [f"S{i}1" for i in range(2, result.center_s.shape[0] + 1)],
+            [s_name(i, 1) for i in range(2, result.center_s.shape[0] + 1)],
         ),
         (ax2, "Отражение и связь", ["S11", "S23"]),
     ):
@@ -405,9 +531,13 @@ def _plot_dashboard_trace(
             for port, (values, center) in enumerate(zip(gamma.T, center_gamma), start=1)
         ]
     else:
-        values = np.abs(result.scattering[:, 1, 0])
-        center = abs(result.center_s[1, 0])
-        series = [("S₂₁", _display_db(values), _display_db(center))]
+        subscript = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+        series = [
+            (s_name(port + 1, 1).translate(subscript),
+             _display_db(np.abs(result.scattering[:, port, 0])),
+             _display_db(abs(result.center_s[port, 0])))
+            for port in range(1, result.center_s.shape[0])
+        ]
 
     for index, (label, values, _) in enumerate(series):
         ax.plot(
@@ -437,7 +567,7 @@ def _plot_dashboard_trace(
     if reflection:
         ax.set(ylabel="КСВ", ylim=(0.98, max(1.05, ax.get_ylim()[1])))
     elif is_db:
-        minimum = float(np.min(series[0][1]))
+        minimum = min(float(np.min(values)) for _, values, _ in series)
         ax.set(ylabel="Уровень, дБ", ylim=(max(DB_FLOOR - 2, min(-20, minimum - 2)), 0))
     else:
         ax.set(ylabel="|Γ|")
@@ -467,19 +597,21 @@ def plot_power(figure: Figure, result: Result) -> None:
     loss = max(0, 1 - float(power.sum()))
     values = list(power[1:]) + [reflected, loss]
     labels = [f"P{i}" for i in range(2, len(power) + 1)] + ["Отражено", "Потери"]
-    selected = [(label, value) for label, value in zip(labels, values) if value > 1e-10]
+    colors = list(SERIES[:len(power) - 1]) + ["#ed923b", "#9ba8ba"]
+    selected = [(label, value, color) for label, value, color in zip(labels, values, colors) if value > 1e-10]
     ax, text_ax = figure.subplots(1, 2, gridspec_kw={"width_ratios": [1, 1.25]})
-    ax.pie([value for _, value in selected], colors=SERIES, startangle=90, counterclock=False,
+    ax.pie([value for _, value, _ in selected], colors=[color for _, _, color in selected],
+           startangle=90, counterclock=False,
            wedgeprops={"width": 0.31, "edgecolor": "white", "linewidth": 1.4})
     ax.text(0, 0, "P₁\n100%", ha="center", va="center", weight="bold", fontsize=11, color="#111b32")
     ax.set_aspect("equal")
     text_ax.axis("off")
     text_ax.text(0.02, 0.91, "Входная мощность: 100%", fontsize=8, color="#18253e", va="top")
     spacing = min(0.26, 0.72 / max(1, len(selected)))
-    for index, (label, value) in enumerate(selected):
+    for index, (label, value, color) in enumerate(selected):
         y = 0.65 - index * spacing
-        text_ax.plot(0.05, y, "s", ms=7, color=SERIES[index % len(SERIES)], clip_on=False)
+        text_ax.plot(0.05, y, "s", ms=6, color=color, clip_on=False)
         db = 10 * np.log10(value)
         text_ax.text(0.16, y, f"{label}  {value:.1%}  ({db:.2f} дБ)",
-                     fontsize=7.5, va="center", color="#18253e")
+                     fontsize=7.5 if len(selected) <= 6 else 6.5, va="center", color="#18253e")
     text_ax.set(xlim=(0, 1.1), ylim=(-0.15, 1))
